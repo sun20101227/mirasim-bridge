@@ -67,7 +67,7 @@ test('one slow Kimi request cannot consume both upstream slots; cancellation rel
   const upstream = http.createServer(async (req, res) => {
     let raw = ''; for await (const c of req) raw += c;
     const body = JSON.parse(raw);
-    if (body.model === 'kimi-k3') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': waiting\n\n'); return; }
+    if (body.model === 'kimi-k3') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write('data: {"type":"message_start","message":{"usage":{}}}\n\n'); return; }
     res.end('{"type":"message","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}');
   });
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));

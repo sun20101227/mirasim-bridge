@@ -24,8 +24,8 @@ const { execFileSync, spawn, spawnSync } = require('node:child_process');
 const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = require('./lib/relay');
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
-const { pipeEvents } = require('./lib/sse');
-const VERSION = '0.7.0';
+const { pipeEvents, endWithStreamError } = require('./lib/sse');
+const VERSION = '0.7.1';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -1765,6 +1765,7 @@ function handleInternal(req, res, cfg, ctx) {
       backend: cfg.backend,
       relay: target?.relay ? { ready: target.relay.ready } : undefined,
       quota: ctx.quota || { available: false, stale: true },
+      last_stream_error: ctx.lastStreamError || null,
       disabled_models: cfg.constraints.disabled_models,
       sub2api: {
         managed: Boolean(ctx.sm),
@@ -2120,15 +2121,37 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     return res.end(out);
   }
 
-  if (status === 200 && /text\/event-stream/i.test(upRes.headers['content-type'] || '')
+  if (status === 200 && req.method === 'POST' && /text\/event-stream/i.test(upRes.headers['content-type'] || '')
       && ['/v1/messages', '/v1/responses'].includes(wirePath)) {
     const eventHeaders = mergedHeaders(upRes.headers);
     delete eventHeaders['content-length']; // Terminal events can finish before the upstream body/EOF.
-    res.writeHead(status, eventHeaders);
+    const kind = wirePath === '/v1/messages' ? 'messages' : 'responses';
+    const requestId = crypto.randomBytes(8).toString('hex');
+    eventHeaders['x-bridge-request-id'] = requestId;
+    eventHeaders['x-accel-buffering'] = 'no';
+    eventHeaders['cache-control'] = 'no-cache, no-transform';
+    res.setHeader('x-bridge-request-id', requestId);
+    const record = (code) => {
+      ctx.lastStreamError = { code, request_id: requestId, model: String(cleanBody?.model || '').slice(0, 160), protocol: kind, at: new Date().toISOString() };
+      warn('stream_failure ' + JSON.stringify(ctx.lastStreamError));
+    };
     try {
-      const ok = await pipeEvents(upRes, res, wirePath === '/v1/messages' ? 'messages' : 'responses');
-      if (ok) ctx.counters.ok++; else ctx.counters.err++;
-    } catch { ctx.counters.err++; res.destroy(); }
+      if (upRes.headers['content-encoding'] && upRes.headers['content-encoding'] !== 'identity') throw Object.assign(Error('unexpected encoding'), { code: 'upstream_stream_encoding' });
+      const ok = await pipeEvents(upRes, res, kind, {
+        begin: () => res.writeHead(status, eventHeaders),
+        firstEventTimeoutMs: cfg.forward.upstream_headers_timeout_ms,
+      });
+      if (ok) ctx.counters.ok++;
+      else { ctx.counters.err++; record('upstream_stream_error'); }
+    } catch (err) {
+      ctx.counters.err++;
+      if (!res.destroyed) {
+        const code = /^upstream_stream_[a-z_]+$/.test(err.code || '') ? err.code : 'upstream_stream_interrupted';
+        record(code);
+        if (!res.headersSent) fail503(res, code);
+        else endWithStreamError(res, kind, code);
+      }
+    } finally { upRes.destroy(); }
     return;
   }
 
