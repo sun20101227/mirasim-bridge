@@ -2,7 +2,7 @@
 
 本版提供宿主机部署接口。服务器只需接入一次，以后调用接口即可拉取发布镜像并重建 bridge，不用反复上传 ZIP，也不需要在服务器安装 Node 或构建镜像。部署工具需要 Python 3.10+、Docker Engine、Compose V2 和 systemd。
 
-**当前交付的是代码和发布流程，尚未发布到你的仓库，也未安装到服务器。** 示例的 `sun20101227/mirasim-bridge` 必须换成你拥有的仓库；不能直接使用参考项目的发布地址。
+**发布仓库：[sun20101227/mirasim-bridge](https://github.com/sun20101227/mirasim-bridge)。** 下方已填写真实发布地址。服务器仍需执行一次接入命令；发布代码不会自动操作服务器。
 
 ## 1. 建立固定发布源
 
@@ -27,16 +27,16 @@
 
 本版 manifest 下载不带 GitHub 私有仓库认证；如不公开源码，可把发布资产放到你控制的 HTTPS 下载地址。镜像使用服务器现有 `docker login` 凭证拉取。发布源必须可靠，因为其镜像会成为服务器运行代码。
 
-此流程尚未在你的 GitHub 仓库实际运行，发布权限与跨架构构建需首次发布验收。
+`v0.6.0` 已发布。GitHub Ubuntu 构建通过全部 Node/Python 测试及 Bash 语法检查；amd64/arm64 镜像已推送，amd64 容器离线自测通过。已确认 GHCR 可匿名读取。服务器上的实际升级、回退与 systemd 仍需接入后验收。
 
 ## 2. 已有服务器一次性接入
 
 主 bridge 必须已经按 DOCKER.md 正常运行，镜像名是默认的 `mirasim-bridge:local`。本工具兼容标准 0.4.2/0.4.3/0.5.0 Compose 部署；自定义镜像名称或拓扑会拒绝接管。
 
-发布完成后，服务器可以直接从网络下载部署工具，无需再上传本版 ZIP。先把下方地址换成你的发布地址：
+服务器可以直接下载部署工具，无需再上传 ZIP。在现有 Compose 项目目录执行（目录中应有 compose.yaml 和 .env）：
 
 ```bash
-test -f compose.yaml || { echo "?????? Compose ????"; exit 1; }
+test -f compose.yaml || { echo "Please enter the existing Compose project directory"; exit 1; }
 deploy_script="$(mktemp)"
 curl --fail --location --proto '=https' --proto-redir '=https' \
   https://github.com/sun20101227/mirasim-bridge/releases/latest/download/deploy-agent.py \
@@ -47,7 +47,7 @@ sudo python3 "$deploy_script" install \
   --image-repository ghcr.io/sun20101227/mirasim-bridge
 ```
 
-`--project-dir` 必须换成你服务器现有 Compose 目录。若先上传本版源码，也可直接运行 `sudo python3 scripts/deploy-agent.py install ...`。
+`--project-dir "$PWD"` 使用当前 Compose 目录，不要在新建的空目录运行。若先上传本版源码，也可直接运行 `sudo python3 scripts/deploy-agent.py install ...`。
 
 已有第二、第三个独立账号时，在安装命令加 `--profile second --profile third`；对应 `.env.second`、`.env.third` 与 profile Compose 文件必须已存在。host 网络方案加 `--host-network`。工具只重建这些目标中**当前运行的** bridge，已停止的账号保持停止，未配置的其他容器不接管。
 
@@ -120,7 +120,7 @@ sudo journalctl -u mirasim-deploy --since '10 min ago' --no-pager
 
 最近一次成功升级也可用该接口回退。回退只恢复镜像，不把已轮换凭证恢复成旧 token；上游故障本身不会因镜像回退而消失。部署进程在切换阶段中断后，服务重启会读取记录并尝试回退。不要在部署/回退期间运行 `docker image prune`、手动重建或修改受管 Compose 文件。
 
-本轮验证为模拟 Docker 的升级/回退故障测试和真实本地 HTTP 鉴权测试；没有 Docker Engine 的实际拉取、重建或 systemd 真机结果。
+升级/回退故障测试使用模拟 Docker，HTTP 鉴权使用本地真实服务。GitHub 发布流水线已实际构建并拉取 Linux 镜像、运行 amd64 容器自测；现有生产容器重建和 systemd 安装仍需在服务器验收。
 
 ## 尚未安装 bridge 的全新服务器
 

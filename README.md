@@ -2,7 +2,7 @@
 
 把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.6.0**，支持网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
 
-**以后不想手动上传 ZIP：**见 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md)。一次性安装宿主机部署工具后，可用带独立密钥的 HTTP 接口拉取固定发布源并更新镜像，失败尝试回退。已附 GitHub Actions 发布流程；尚未替你发布仓库或在服务器启用接口。
+**以后不想手动上传 ZIP：**见 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md)。一次性安装宿主机部署工具后，可用带独立密钥的 HTTP 接口拉取固定发布源并更新镜像，失败尝试回退。源码与发布入口：[GitHub](https://github.com/sun20101227/mirasim-bridge) · [最新版本](https://github.com/sun20101227/mirasim-bridge/releases/latest)。服务器仍需按说明接入一次。
 
 **已部署 0.4.3 的用户请按 [UPGRADE-0.5.0.md](UPGRADE-0.5.0.md) 更新代码**。新增账号操作见 [ACCOUNTS.md](ACCOUNTS.md)。
 
@@ -12,7 +12,7 @@
 
 ## 验证范围
 
-0.6.0 延续 82 项 Node 回归和 67 项自测，新增 8 项 Python 网络部署测试，覆盖接口鉴权、固定镜像摘要、部署失败回退及中断恢复。Docker 操作由 mock 验证，本机没有 Docker Engine；GitHub 发布流程和宿主机部署仍需实际验收。
+0.6.0 延续 82 项 Node 回归和 67 项自测，新增 8 项 Python 网络部署测试，覆盖接口鉴权、固定镜像摘要、部署失败回退及中断恢复。部署/回退操作由 mock 验证；GitHub Ubuntu 发布已通过测试，完成 amd64/arm64 构建与 amd64 容器离线自测，镜像支持匿名拉取。宿主机部署及生产容器升级仍需服务器验收。
 
 0.5.0 通过 67 项自测、82 项 Node 回归；涵盖独立 OAuth profile、额度同步、DeepSeek 禁用策略、Kimi 终止帧/超时/并发限制。真实第二个 Google 账号授权和 Linux 容器运行仍需服务器验收；自动测试使用模拟 OAuth。
 
