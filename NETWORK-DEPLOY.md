@@ -1,5 +1,7 @@
 # 网络部署与远程升级接口（0.6.0）
 
+**希望在对话或 GitHub 直接触发，且没有 SSH：**使用 0.6.1 的 [主动读取指令功能](REMOTE-CONTROL.md)。旧工具需通过网页终端接入一次；下面的本机 API 继续保留。
+
 本版提供宿主机部署接口。服务器只需接入一次，以后调用接口即可拉取发布镜像并重建 bridge，不用反复上传 ZIP，也不需要在服务器安装 Node 或构建镜像。部署工具需要 Python 3.10+、Docker Engine、Compose V2 和 systemd。
 
 **发布仓库：[sun20101227/mirasim-bridge](https://github.com/sun20101227/mirasim-bridge)。** 下方已填写真实发布地址。服务器仍需执行一次接入命令；发布代码不会自动操作服务器。

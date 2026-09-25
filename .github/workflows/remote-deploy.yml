@@ -1,0 +1,35 @@
+name: Request server deployment
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Enrolled server target (not an account profile)
+        required: true
+        default: main
+        type: string
+      action:
+        description: Action for the server to pick up within 15 minutes
+        required: true
+        default: deploy
+        type: choice
+        options: [deploy, rollback]
+permissions:
+  contents: write
+concurrency:
+  group: remote-control-commands
+  cancel-in-progress: false
+jobs:
+  request:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Publish command (not a server completion acknowledgment)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_TARGET: ${{ inputs.target }}
+          DEPLOY_ACTION: ${{ inputs.action }}
+        run: python3 scripts/issue-deploy-command.py

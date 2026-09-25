@@ -25,7 +25,8 @@ $sourceFiles = @(
     'tests/model-sync.test.js', 'UPGRADE-0.4.3.md', 'UPGRADE-0.5.0.md', 'ACCOUNTS.md',
     'lib/login.js', 'lib/quota.js', 'lib/sse.js', 'scripts/account-login.js', 'compose.profile.yaml', 'compose.profile.host.yaml',
     'tests/accounts-quota.test.js', 'tests/model-latency.test.js',
-    'scripts/deploy-agent.py', 'tests/test_network_deploy.py', 'NETWORK-DEPLOY.md', '.github/workflows/publish.yml'
+    'scripts/deploy-agent.py', 'tests/test_network_deploy.py', 'NETWORK-DEPLOY.md', '.github/workflows/publish.yml',
+    'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

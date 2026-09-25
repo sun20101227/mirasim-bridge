@@ -83,6 +83,66 @@ def validate_manifest(data, repository):
     return {key: data[key] for key in ('version', 'image')}
 
 
+def remote_url(repository, target):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        raise ValueError('Expected GitHub owner/repository')
+    if not re.fullmatch(r'[a-z][a-z0-9_-]{0,39}', target):
+        raise ValueError('Invalid remote target')
+    return f'https://raw.githubusercontent.com/{repository}/deploy-control/remote-control/{target}.json'
+
+
+def validate_remote_command(data, remote, now=None):
+    now = int(time.time()) if now is None else now
+    if not isinstance(data, dict) or set(data) != {'id', 'target', 'action', 'issued_at', 'expires_at'}:
+        raise ValueError('Invalid remote command fields')
+    if not re.fullmatch(r'[0-9a-f]{32}', str(data['id'])) or data['target'] != remote['target']:
+        raise ValueError('Invalid remote command identity')
+    if data['action'] not in ('deploy', 'rollback'):
+        raise ValueError('Unsupported remote action')
+    issued, expiry = data['issued_at'], data['expires_at']
+    if type(issued) is not int or type(expiry) is not int:
+        raise ValueError('Invalid remote command timestamps')
+    if not remote['enrolled_at'] <= issued <= now or not issued < expiry <= issued + 900 or now >= expiry:
+        raise ValueError('Remote command is expired, predates enrollment, or is from the future')
+    return dict(data)
+
+
+def fetch_remote_command(remote):
+    from urllib.request import Request
+    url = remote_url(remote['repository'], remote['target'])
+    req = Request(url + '?poll=' + str(int(time.time())), headers={'Cache-Control': 'no-cache'})
+    with build_opener(HTTPSRedirects()).open(req, timeout=20) as response:
+        raw = response.read(4097)
+    if len(raw) > 4096:
+        raise ValueError('Remote command too large')
+    return json.loads(raw)
+
+
+class RemotePoller:
+    def __init__(self, agent, fetch=fetch_remote_command):
+        self.agent, self.fetch = agent, fetch
+
+    def once(self):
+        remote = self.agent.cfg['remote_control']
+        data = validate_remote_command(self.fetch(remote), remote)
+        return self.agent.start(recover=data['action'] == 'rollback', remote_command=data)
+
+    def run(self, stopped):
+        previous_error = None
+        while not stopped.is_set():
+            try:
+                if self.once():
+                    print('Remote deployment command accepted', flush=True)
+                previous_error = None
+            except Exception as exc:
+                # 404 is normal before the first command. Never log the response body.
+                label = type(exc).__name__
+                if getattr(exc, 'code', None) != 404 and label != previous_error:
+                    print('Remote command check failed:', label, flush=True)
+                previous_error = label
+            stopped.wait(self.agent.cfg['remote_control'].get('interval_sec', 30))
+
+
 def command(args, timeout=180):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
@@ -121,15 +181,23 @@ class Agent:
                         raise ValueError('Target file must be inside the project directory')
         if not 10 <= config.get('health_timeout_sec', 180) <= 600:
             raise ValueError('health_timeout_sec must be 10..600')
+        if config.get('remote_control'):
+            remote = config['remote_control']
+            remote_url(remote['repository'], remote['target'])
+            if type(remote.get('enrolled_at')) is not int or remote['enrolled_at'] < 1:
+                raise ValueError('Remote enrollment timestamp required')
+            if not 10 <= remote.get('interval_sec', 30) <= 300:
+                raise ValueError('Remote interval must be 10..300 seconds')
 
     def save(self, **patch):
         with self.data_lock:
-            self.state.update(patch, updated_at=int(time.time()))
-            atomic_json(self.state_file, self.state)
+            updated = {**self.state, **patch, 'updated_at': int(time.time())}
+            atomic_json(self.state_file, updated)
+            self.state = updated
 
     def status(self):
         with self.data_lock:
-            return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error') if k in self.state}
+            return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error', 'remote_command') if k in self.state}
 
     def compose(self, target, *args, timeout=180):
         argv = ['docker', 'compose', '--project-directory', str(self.project)]
@@ -214,15 +282,28 @@ class Agent:
             else:
                 self.save(phase='failed', error='Release preparation failed; running containers unchanged')
 
-    def start(self, recover=False):
+    def start(self, recover=False, remote_command=None):
         if not self.lock.acquire(blocking=False):
             return False
         try:
             if (recover and not self.state.get('snapshots')) or (not recover and self.state.get('phase') == 'rollback_failed'):
                 self.lock.release()
                 return False
+            patch = {}
+            if remote_command is not None:
+                remote_command = validate_remote_command(remote_command, self.cfg['remote_control'])
+                last = self.state.get('remote_command', {})
+                if remote_command['issued_at'] <= last.get('issued_at', 0):
+                    self.lock.release()
+                    return False
+                patch['remote_command'] = remote_command
             if not recover:
-                self.save(phase='checking', job_id=secrets.token_hex(12), version=None, error=None)
+                patch.update(phase='checking', job_id=secrets.token_hex(12), version=None, error=None)
+            elif remote_command is not None:
+                patch.update(phase='rolling_back', job_id=secrets.token_hex(12), error=None)
+            if patch:
+                # Claim durably before starting work: a restart cannot replay a command.
+                self.save(**patch)
             def work():
                 try:
                     self.rollback() if recover else self.deploy()
@@ -298,10 +379,18 @@ def serve(config):
         agent.start(recover=True)
     elif agent.state.get('phase') in ACTIVE:
         agent.save(phase='failed', error='Release preparation interrupted; containers unchanged')
+    stopped = threading.Event()
+    poller = None
+    if config.get('remote_control'):
+        poller = threading.Thread(target=RemotePoller(agent).run, args=(stopped,), daemon=True)
+        poller.start()
     try:
         server.serve_forever()
     finally:
+        stopped.set()
         server.server_close()
+        if poller:
+            poller.join(25)
         if agent.worker:
             agent.worker.join()
         lock_file.close()
@@ -353,6 +442,43 @@ def install(args):
     print('Installed on 127.0.0.1:8790; token header: /etc/mirasim-deploy/auth.header')
 
 
+def require_linux_root():
+    if os.name != 'posix' or os.geteuid() != 0:
+        raise ValueError('Enable remote control from the Linux host console as root')
+
+
+def enable_remote(args, run=command, config_file=Path('/etc/mirasim-deploy/config.json'),
+                  destination=Path('/opt/mirasim-deploy/deploy-agent.py')):
+    require_linux_root()
+    remote_url(args.repository, args.target)
+    config = json.loads(config_file.read_text())
+    existing = config.get('remote_control')
+    # Preserve enrollment on a repeat setup of the same target.
+    enrolled = existing['enrolled_at'] if existing and existing['repository'] == args.repository and existing['target'] == args.target else int(time.time()) + 1
+    config['remote_control'] = {'repository': args.repository, 'target': args.target,
+                                'enrolled_at': enrolled, 'interval_sec': 30}
+    agent = Agent(config, run=run)
+    if agent.state.get('phase') in ACTIVE:
+        raise ValueError('Wait for the current deployment before updating its agent')
+    # Only upgrade the host helper and its control settings. Never touch bridge data.
+    tmp = destination.with_name(destination.name + '.' + secrets.token_hex(8) + '.tmp')
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(Path(__file__).read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, destination)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    atomic_json(config_file, config)
+    run(['systemctl', 'restart', 'mirasim-deploy.service'])
+    run(['systemctl', 'is-active', '--quiet', 'mirasim-deploy.service'])
+    print('Remote polling enabled for target ' + args.target + '; no SSH or inbound port required.')
+    print('Workflow acceptance is not server completion; local status remains at /v1/deploy/status.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
@@ -364,9 +490,14 @@ def main():
     setup.add_argument('--image-repository', required=True)
     setup.add_argument('--host-network', action='store_true')
     setup.add_argument('--profile', action='append', default=[])
+    remote = sub.add_parser('enable-remote')
+    remote.add_argument('--repository', default='sun20101227/mirasim-bridge')
+    remote.add_argument('--target', default='main')
     args = parser.parse_args()
     if args.action == 'install':
         install(args)
+    elif args.action == 'enable-remote':
+        enable_remote(args)
     else:
         serve(json.loads(Path(args.config).read_text()))
 

@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+import time
+from types import SimpleNamespace
+from unittest.mock import patch
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 
@@ -153,6 +156,118 @@ class DeploymentTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def remote(self, agent):
+        now = int(time.time())
+        agent.cfg['remote_control'] = {'repository': 'example/mirasim', 'target': 'main', 'enrolled_at': now - 100}
+        return {'id': 'e' * 32, 'target': 'main', 'action': 'deploy', 'issued_at': now - 2, 'expires_at': now + 60}
+
+    def test_remote_rejects_wrong_target_expired_future_and_arbitrary_fields(self):
+        agent = self.agent()
+        valid = self.remote(agent)
+        invalid = [{'target': 'other'}, {'expires_at': int(time.time()) - 1},
+                   {'issued_at': int(time.time()) + 60}, {'issued_at': 0},
+                   {'expires_at': int(time.time()) + 10000}, {'action': 'shell'},
+                   {'id': '../etc'}, {'issued_at': True}, {'url': 'https://evil.test'}]
+        for override in invalid:
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                m.validate_remote_command({**valid, **override}, agent.cfg['remote_control'])
+        self.assertEqual(m.validate_remote_command(valid, agent.cfg['remote_control']), valid)
+        for repository, target in [('example/mirasim', '../main'), ('evil/x/../y', 'main')]:
+            with self.assertRaises(ValueError):
+                m.remote_url(repository, target)
+
+    def test_remote_consumes_once_across_restart_and_rejects_older_commands(self):
+        agent = self.agent()
+        data = self.remote(agent)
+        poller = m.RemotePoller(agent, fetch=lambda _: data)
+        self.assertTrue(poller.once())
+        agent.worker.join(5)
+        self.assertEqual(agent.status()['phase'], 'succeeded')
+        previous_calls = len(self.calls)
+        self.assertFalse(poller.once())
+        restarted = self.agent()
+        self.assertFalse(m.RemotePoller(restarted, fetch=lambda _: data).once())
+        old = {**data, 'id': 'f' * 32, 'issued_at': data['issued_at'] - 1}
+        self.assertFalse(m.RemotePoller(restarted, fetch=lambda _: old).once())
+        self.assertEqual(len(self.calls), previous_calls)
+
+    def test_remote_busy_command_remains_pending_and_network_failure_does_not_deploy(self):
+        agent = self.agent()
+        data = self.remote(agent)
+        poller = m.RemotePoller(agent, fetch=lambda _: data)
+        agent.lock.acquire()
+        self.assertFalse(poller.once())
+        self.assertNotIn('remote_command', agent.state)
+        agent.lock.release()
+        def offline(_):
+            raise OSError('offline')
+        with self.assertRaises(OSError):
+            m.RemotePoller(agent, fetch=offline).once()
+        self.assertFalse(self.calls)
+        self.assertTrue(poller.once())
+        agent.worker.join(5)
+
+    def test_remote_claim_write_failure_cannot_start_work(self):
+        agent = self.agent()
+        data = self.remote(agent)
+        with patch.object(m, 'atomic_json', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                m.RemotePoller(agent, fetch=lambda _: data).once()
+        self.assertFalse(self.calls)
+        self.assertIsNone(agent.worker)
+        self.assertNotIn('remote_command', agent.state)
+        self.assertTrue(agent.lock.acquire(blocking=False))
+        agent.lock.release()
+        self.assertTrue(m.RemotePoller(agent, fetch=lambda _: data).once())
+        agent.worker.join(5)
+
+    def test_remote_rollback_uses_existing_recovery_journal(self):
+        agent = self.agent()
+        data = self.remote(agent)
+        data['action'] = 'rollback'
+        poller = m.RemotePoller(agent, fetch=lambda _: data)
+        self.assertFalse(poller.once())
+        agent.deploy()
+        self.assertTrue(poller.once())
+        agent.worker.join(5)
+        self.assertEqual(agent.state['phase'], 'rolled_back')
+        self.assertFalse(poller.once())
+
+    def test_enrollment_preserves_keys_profiles_and_rejects_active_deployment(self):
+        agent = self.agent()
+        cfg_file = self.root / 'agent.json'
+        key = self.root / 'key'
+        key.write_text('existing-secret')
+        self.cfg['token_file'] = str(key)
+        m.atomic_json(cfg_file, self.cfg)
+        dest = self.root / 'helper.py'
+        dest.write_text('old helper')
+        args = SimpleNamespace(repository='example/mirasim', target='main')
+        with patch.object(m, 'require_linux_root'):
+            m.enable_remote(args, run=self.run_docker, config_file=cfg_file, destination=dest)
+            first = json.loads(cfg_file.read_text())
+            m.enable_remote(args, run=self.run_docker, config_file=cfg_file, destination=dest)
+            self.assertEqual(first, json.loads(cfg_file.read_text()))
+            self.assertEqual(first['targets'], self.cfg['targets'])
+            self.assertEqual(key.read_text(), 'existing-secret')
+            agent.save(phase='activating')
+            with self.assertRaises(ValueError):
+                m.enable_remote(args, run=self.run_docker, config_file=cfg_file, destination=dest)
+        self.assertIn(['systemctl', 'restart', 'mirasim-deploy.service'], self.calls)
+
+    def test_command_publisher_only_accepts_named_targets_and_fixed_actions(self):
+        spec = importlib.util.spec_from_file_location('issue_command', Path(__file__).parents[1] / 'scripts/issue-deploy-command.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for target in ['../main', 'main;id', 'main\n', '']:
+            with self.assertRaises(ValueError):
+                module.make_command(target, 'deploy')
+        with self.assertRaises(ValueError):
+            module.make_command('main', 'shell')
+        remote = {'target': 'main', 'enrolled_at': 90}
+        result = module.make_command('main', 'deploy', now=100)
+        self.assertEqual(m.validate_remote_command(result, remote, now=101), result)
 
 
 if __name__ == '__main__':

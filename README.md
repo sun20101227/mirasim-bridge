@@ -1,6 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.6.0**，支持网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.6.1**，支持网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**无需 SSH，在对话或 GitHub 里触发升级：**见 [REMOTE-CONTROL.md](REMOTE-CONTROL.md)。服务器主动读取升级指令，无需公网管理端口。已安装的旧版部署工具需要通过云厂商网页终端/服务器面板更新一次；这里不能凭空接入一个没有远程控制通道的服务器。
 
 **以后不想手动上传 ZIP：**见 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md)。一次性安装宿主机部署工具后，可用带独立密钥的 HTTP 接口拉取固定发布源并更新镜像，失败尝试回退。源码与发布入口：[GitHub](https://github.com/sun20101227/mirasim-bridge) · [最新版本](https://github.com/sun20101227/mirasim-bridge/releases/latest)。服务器仍需按说明接入一次。
 
