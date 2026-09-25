@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents } = require('./lib/sse');
-const VERSION = '0.6.1';
+const VERSION = '0.7.0';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -1687,6 +1687,13 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
   const server = http.createServer(async (req, res) => {
     ctx.counters.total++;
 
+    // The HTML shell contains no account data; its API calls use panel key auth.
+    if (req.url === '/panel' || req.url.startsWith('/panel/')) return require('./lib/panel').page(res, req.url);
+    if (req.url.startsWith('/__panel/')) {
+      try { return await require('./lib/panel').handle(req, res, cfg, ctx); }
+      catch { return fail503(res, 'panel unavailable'); }
+    }
+
     // --- 入站鉴权（§8）---
     if (secret && !secretMatches(presentedKey(req), secret)) {
       ctx.counters.rejected++;
@@ -1694,7 +1701,9 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
     }
     if (ctx.shuttingDown) return fail503(res, 'shutting down');
     if (req.url.startsWith('/__')) {
-      try { return handleInternal(req, res, cfg, ctx); }
+      try {
+        return handleInternal(req, res, cfg, ctx);
+      }
       catch { return fail503(res, 'status unavailable'); }
     }
 
@@ -1728,7 +1737,7 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
   server.timeout = 0;
   server.keepAliveTimeout = 72_000;
   server.on('connection', (s) => s.setNoDelay(true));
-  server.on('close', () => agent.destroy());
+  server.on('close', () => { agent.destroy(); ctx.panel?.close(); });
   return server;
 }
 
@@ -3418,8 +3427,8 @@ mirasim-bridge ${VERSION}  —— Claude / GPT / DeepSeek / Kimi（Messages + GP
   quota [--direct]
         relay 模式读取剩余百分比/重置时间；--raw 返回原始 limits，不触发模型推理。
 
-  login --profile mira2 --public-base-url http://mirasim-mira2:8787 [--provider google]
-        独立 OAuth 登录另一个账号，保存到配置目录 profiles/mira2，不覆盖原凭证。
+  login --profile mira2 --public-base-url http://mirasim-mira2:8787 [--provider google|email]
+        独立登录另一个账号；email 会走 Mirasim 的邮箱验证码授权，保存到 profiles/mira2，不覆盖原凭证。
   accounts
         列出独立 profile（不输出 token）。每个 profile 使用独立进程/容器运行。
 
@@ -3536,7 +3545,7 @@ async function main() {
 }
 
 if (require.main === module) main().catch((err) => fatal(err && err.stack ? err.stack : String(err)));
-module.exports = { DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
+module.exports = { VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
   modelFamily, isModelAllowed, summarizeModelResponse, diagnosticTarget, diagnosticRequest,

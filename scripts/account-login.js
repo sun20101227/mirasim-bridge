@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { profileDirectory, createCredential, startLogin, manualInput, listProfiles } = require('../lib/login');
+const { profileDirectory, createCredential, startLogin, startEmailLogin, manualInput, listProfiles } = require('../lib/login');
 const { RelayClient, request, readText } = require('../lib/relay');
 const { DEFAULT_CONFIG, deepMerge, validateConfig } = require('../mirasim-bridge');
 
@@ -31,6 +31,28 @@ async function login(base, flags, { output = process.stdout } = {}) {
   if (fs.existsSync(dir)) throw Error('profile 已存在；请使用新名称，原凭证不会被覆盖');
   const cfg = profileConfig(base, flags.profile, flags);
   cfg.forward.failure_log = path.join(dir, 'requests.log');
+  if ((flags.provider || 'google') === 'email') {
+    const readline = require('node:readline/promises');
+    const input = readline.createInterface({ input: process.stdin, output });
+    let capture;
+    try {
+      const email = (flags.email || await input.question('邮箱：')).trim();
+      capture = await startEmailLogin({ authUrl: cfg.relay.auth_url, email });
+      output.write('验证码已发送到邮箱。\n');
+      const code = (await input.question('验证码：')).trim();
+      const tokens = await capture.submit(code);
+      const credential = createCredential(tokens);
+      const response = await request(new URL(cfg.relay.auth_url.replace(/\/$/, '') + '/auth/me'), {
+        headers: { authorization: 'Bearer ' + tokens.access }, totalTimeout: 15000 });
+      await readText(response, 1024 * 1024);
+      if (response.statusCode !== 200) throw Error(`登录凭证校验 HTTP ${response.statusCode}；原账号未修改`);
+      fs.mkdirSync(path.dirname(dir), { recursive: true, mode: 0o700 }); fs.mkdirSync(dir, { mode: 0o700 });
+      fs.writeFileSync(path.join(dir, 'setting.json'), JSON.stringify(credential, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(cfg, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+      output.write(`已保存独立 profile: ${flags.profile}；原账号和桌面配置未修改。\n新 sub2api 账号名: ${cfg.sub2api.account_name}\n`);
+      return { profile: flags.profile, relay_ready: false };
+    } finally { capture?.close(); input.close(); }
+  }
   const capture = await startLogin({ authUrl: cfg.relay.auth_url, provider: flags.provider || 'google',
     port: flags['callback-port'] === undefined ? 0 : Number(flags['callback-port']) });
   const finishInput = manualInput((line) => {
@@ -39,7 +61,7 @@ async function login(base, flags, { output = process.stdout } = {}) {
   }, process.stdin, output);
   const cancel = () => capture.close();
   process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
-  output.write('请在浏览器的无痕窗口打开下面的地址，选择新的 Google/Mirasim 账号。无需退出桌面原账号。\n'
+  output.write(`请在浏览器的无痕窗口打开下面的地址，使用 ${flags.provider || 'google'} 登录新的 Mirasim 账号。无需退出桌面原账号。\n`
     + capture.url + '\n\n若服务器/容器的回调打不开，把浏览器最终地址粘贴到本终端并回车（输入隐藏）。\n不要把含 token 的回调地址发给别人。等待最多 15 分钟。\n');
   try {
     const tokens = await capture.result;

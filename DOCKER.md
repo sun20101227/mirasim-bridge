@@ -2,7 +2,7 @@
 
 本方案只部署独立的 Mirasim bridge，通过 sub2api 原有管理 API 注册普通上游账号；不升级 sub2api、不加载 `.s2plugin`，也不改变 Quota Keeper 的插件绑定。
 
-希望以后直接联网升级，按 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md) 接入部署接口。以下初始化步骤只用于新安装；新增独立 Google 登录、每账号容器及 sub2 分组见 [ACCOUNTS.md](ACCOUNTS.md)。真实剩余额度在账号列表启用备注列查看。
+希望以后直接联网升级，按 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md) 接入部署接口。bridge 运行后可打开 `/panel` 使用专用管理后台，见 [PANEL.md](PANEL.md)。以下初始化步骤只用于新安装；新增独立 Google/邮箱登录、每账号容器及 sub2 分组见 [ACCOUNTS.md](ACCOUNTS.md)。真实剩余额度在页面或账号列表备注列查看。
 
 默认用 Anthropic API Key 账号承接 Claude、GPT、DeepSeek、Kimi 的 Messages 请求。桥接器另有 GPT Responses 接口，但现有 Anthropic 分组不会自动变成 OpenAI 分组，详见 MULTI-MODEL.md。
 

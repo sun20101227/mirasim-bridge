@@ -5,6 +5,9 @@ setting.json
 setting.json.*.tmp
 private/
 profiles/
+.panel-key
+panel.key
+panel-profile-*.json
 __pycache__/
 *.pyc
 .env

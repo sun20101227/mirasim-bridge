@@ -24,7 +24,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
           node --test tests/*.test.js
           node mirasim-bridge.js selftest
-          python3 -m unittest discover -s tests -p 'test_network_deploy.py'
+          python3 -m unittest discover -s tests -p 'test_*.py'
           bash -n install.sh
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"

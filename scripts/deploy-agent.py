@@ -374,7 +374,17 @@ def serve(config):
     if len(token) < 32:
         raise ValueError('Deployment token must have at least 32 characters')
     # A reverse proxy/SSH tunnel owns external TLS; never expose plaintext here.
-    server = ThreadingHTTPServer(('127.0.0.1', config.get('port', 8790)), handler(agent, token))
+    selected = handler(agent, token)
+    if config.get('panel'):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('panel_host', Path(__file__).with_name('panel-host.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        panel_token = Path(config['panel']['token_file']).read_text().strip()
+        if not re.fullmatch(r'[a-f0-9]{64}', panel_token):
+            raise ValueError('Invalid panel key')
+        selected = module.handler(agent, panel_token, selected, atomic_json)
+    server = ThreadingHTTPServer(('127.0.0.1', config.get('port', 8790)), selected)
     if agent.state.get('phase') in ('activating', 'rolling_back'):
         agent.start(recover=True)
     elif agent.state.get('phase') in ACTIVE:
@@ -499,7 +509,9 @@ def main():
     elif args.action == 'enable-remote':
         enable_remote(args)
     else:
-        serve(json.loads(Path(args.config).read_text()))
+        config = json.loads(Path(args.config).read_text())
+        config['_config_file'] = str(Path(args.config).resolve())
+        serve(config)
 
 
 if __name__ == '__main__':

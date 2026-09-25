@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.7.0 — 2026-09-25
+
+- 新增专用 `/panel` 管理后台：运行状态、Mirasim 额度、模型启停/测试、profile 列表和独立账号登录。
+- 新增真实邮箱验证码登录：沿用客户端的 `/auth/code` 与 `/auth/verify`，不再把邮箱登录错误地当成 OAuth provider。
+- 新增 Google/邮箱两种网页登录入口；每次登录仍写入独立 profile，不覆盖原账号。
+- panel key 独立于 bridge secret、Mirasim token 和 sub2api 管理 Key；网页不挂 Docker socket。
+- 宿主机网页增加受管账号启停、独立 profile 容器创建和 sub2 自动注册、升级与回退真实进度、操作记录。后台仅接受配置的 HTTPS Origin 和固定操作。
+- 87 项 Node 回归、19 项 Python 测试及 Chrome 桌面/手机交互验证通过；邮箱接口与 Docker 使用模拟服务验证，实际邮件发送与服务器容器运行需验收。
+
 ## 0.6.1 — 2026-09-25
 
 - 宿主机部署工具增加可选的 GitHub 指令检查，可从对话中的 GitHub CLI 或 Actions 页面请求升级/回退，无需 SSH 或公网入站端口。

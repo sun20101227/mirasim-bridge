@@ -1,6 +1,8 @@
 # Allowlist: live credentials, state, uploads and archives never enter the build context.
 **
 !Dockerfile
+!web/
+!web/**
 !mirasim-bridge.js
 !lib/
 lib/**
@@ -9,6 +11,7 @@ lib/**
 !lib/login.js
 !lib/quota.js
 !lib/sse.js
+!lib/panel.js
 !scripts/
 scripts/**
 !scripts/deployment.js
@@ -17,6 +20,7 @@ scripts/**
 !scripts/container-config.js
 !scripts/healthcheck.js
 !scripts/account-login.js
+!scripts/panel-bridge.js
 !THIRD-PARTY-NOTICES.md
 !licenses/
 licenses/**

@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
-const { startLogin, parseCallback, createCredential, profileDirectory, listProfiles } = require('../lib/login');
+const { startLogin, startEmailLogin, parseCallback, createCredential, profileDirectory, listProfiles } = require('../lib/login');
 const { profileConfig, login } = require('../scripts/account-login');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('../lib/quota');
 const { request, readText } = require('../lib/relay');
@@ -63,6 +63,27 @@ test('OAuth timeout and unsupported provider do not create or overwrite credenti
     await assert.rejects(startLogin({ authUrl: origin, provider: 'github' }), /未提供/);
     capture = await startLogin({ authUrl: origin, timeoutMs: 30 });
     await assert.rejects(capture.result, /超时/);
+  } finally { capture?.close(); await close(mock); }
+});
+
+test('email OTP uses the desktop client auth/code and auth/verify endpoints', async () => {
+  const paths = [], bodies = [];
+  const mock = http.createServer(async (req, res) => {
+    paths.push(req.url); let raw = ''; for await (const chunk of req) raw += chunk; bodies.push(raw);
+    if (req.url === '/auth/code') return res.end('{"dev_code":"must-not-be-forwarded"}');
+    if (req.url === '/auth/verify') return res.end('{"access_token":"email-access","refresh_token":"email-refresh"}');
+    res.writeHead(404); res.end();
+  });
+  const origin = await listen(mock); let capture;
+  try {
+    capture = await startEmailLogin({ authUrl: origin, email: 'new@example.com', timeoutMs: 5000 });
+    assert.equal(paths.join(','), '/auth/code');
+    await capture.submit('123456');
+    assert.deepEqual(await capture.result, { access: 'email-access', refresh: 'email-refresh' });
+    assert.deepEqual(paths, ['/auth/code', '/auth/verify']);
+    assert.deepEqual(JSON.parse(bodies[0]), { email: 'new@example.com' });
+    assert.deepEqual(JSON.parse(bodies[1]), { email: 'new@example.com', code: '123456' });
+    await assert.rejects(capture.submit('bad'), /已结束/);
   } finally { capture?.close(); await close(mock); }
 });
 

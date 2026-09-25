@@ -1,6 +1,8 @@
 # 独立 Mirasim 账号与 sub2api 分组
 
-0.5.0 支持用 Google 登录第二个 Mirasim 账号。每个 profile 单独保存凭证、设备密钥、bridge_secret、sub2api 账号名，并运行一个 bridge 进程。代码不会调用原账号的退出接口，也不会覆盖原账号或桌面的 setting.json；上游自己的会话政策仍由 Mirasim 决定。
+0.7.0 支持用 Google 或邮箱验证码登录第二个 Mirasim 账号。每个 profile 单独保存凭证、设备密钥、bridge_secret、sub2api 账号名，并运行一个 bridge 进程。代码不会调用原账号的退出接口，也不会覆盖原账号或桌面的 setting.json；上游自己的会话政策仍由 Mirasim 决定。
+
+网页后台中的“邮箱验证码”使用客户端实际使用的 `POST /auth/code` → `POST /auth/verify` 流程；它不是 OAuth 回调。输入邮箱后收验证码，再输入验证码完成新 profile 保存。
 
 ## 1. 升级原 bridge
 

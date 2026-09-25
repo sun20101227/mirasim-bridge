@@ -23,10 +23,12 @@ $sourceFiles = @(
     'Dockerfile', '.dockerignore', 'compose.yaml', 'compose.host.yaml', '.env.example', 'DOCKER.md',
     'scripts/prepare-container.js', 'scripts/container-config.js', 'scripts/healthcheck.js', 'tests/container.test.js', 'SUB2API-PLUGIN.md',
     'tests/model-sync.test.js', 'UPGRADE-0.4.3.md', 'UPGRADE-0.5.0.md', 'ACCOUNTS.md',
-    'lib/login.js', 'lib/quota.js', 'lib/sse.js', 'scripts/account-login.js', 'compose.profile.yaml', 'compose.profile.host.yaml',
+    'lib/login.js', 'lib/quota.js', 'lib/sse.js', 'lib/panel.js', 'scripts/account-login.js', 'scripts/panel-bridge.js', 'compose.profile.yaml', 'compose.profile.host.yaml',
     'tests/accounts-quota.test.js', 'tests/model-latency.test.js',
     'scripts/deploy-agent.py', 'tests/test_network_deploy.py', 'NETWORK-DEPLOY.md', '.github/workflows/publish.yml',
-    'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md'
+    'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md', 'PANEL.md',
+    'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css',
+    'tests/panel.test.js', 'tests/test_panel_host.py'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {
