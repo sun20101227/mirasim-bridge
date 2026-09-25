@@ -1,0 +1,75 @@
+name: Publish bridge release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  packages: write
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate release and run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node mirasim-bridge.js --version)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          node --test tests/*.test.js
+          node mirasim-bridge.js selftest
+          python3 -m unittest discover -s tests -p 'test_network_deploy.py'
+          bash -n install.sh
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: image
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Package source without credentials
+        shell: pwsh
+        run: ./package.ps1
+      - name: Verify published Linux image
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE@$DIGEST"
+          test "$(docker run --rm --platform linux/amd64 --network none "$IMAGE@$DIGEST" --version)" = "$VERSION"
+          docker run --rm --platform linux/amd64 --network none --read-only --tmpfs /tmp "$IMAGE@$DIGEST" selftest
+      - name: Create deployment manifest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('dist/deploy.json').write_text(json.dumps({
+              'version': os.environ['VERSION'],
+              'image': os.environ['IMAGE'] + '@' + os.environ['DIGEST']
+          }, indent=2) + '\n')
+          PY
+          cp scripts/deploy-agent.py dist/deploy-agent.py
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            dist/*-source.zip dist/*-source.zip.sha256 dist/deploy.json dist/deploy-agent.py

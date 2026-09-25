@@ -1,0 +1,28 @@
+# 含凭证，绝不提交
+config.json
+setting.json
+*.refresh-lock
+setting.json.*.tmp
+private/
+profiles/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+container.config.json
+container-data/
+dist/
+*.zip
+*.zip.tmp
+*.sha256
+state.json
+state.json.*.tmp
+
+# 运行产物
+*.log
+*.log.1
+timeline.jsonl
+
+# 一次性调研探针（可删）
+exp-*.js

@@ -1,0 +1,53 @@
+name: mirasim-bridge
+x-image: &image
+  image: mirasim-bridge:local
+  build:
+    context: .
+    args:
+      NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+services:
+  bridge:
+    <<: *image
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 180s
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    volumes: ["data:/data"]
+    networks:
+      upstream:
+        aliases: [mirasim-bridge]
+      egress: {}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  setup:
+    <<: *image
+    profiles: [setup]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    restart: "no"
+    entrypoint: ["node", "/app/scripts/prepare-container.js", "--uid", "1000", "--gid", "1000"]
+    command: []
+    healthcheck:
+      disable: true
+    volumes: ["data:/data"]
+    secrets: [mirasim_credentials, sub2api_admin_key]
+volumes:
+  data:
+networks:
+  egress: {}
+  upstream:
+    external: true
+    name: ${SUB2API_NETWORK:?Set SUB2API_NETWORK to the existing sub2api Docker network}
+secrets:
+  mirasim_credentials:
+    file: ${MIRASIM_CREDENTIAL_FILE:-./private/setting.json}
+  sub2api_admin_key:
+    file: ${SUB2API_ADMIN_KEY_FILE:-./private/admin-key}

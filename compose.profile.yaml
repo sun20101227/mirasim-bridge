@@ -1,0 +1,38 @@
+# A separate bridge process for one independent Mirasim login; original bridge stays up.
+name: mirasim-profile-${MIRASIM_PROFILE:?Set MIRASIM_PROFILE}
+services:
+  bridge:
+    image: mirasim-bridge:local
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 180s
+    environment:
+      MIRASIM_CONFIG: /data/profiles/${MIRASIM_PROFILE}/config.json
+    command: ["serve", "--config", "/data/profiles/${MIRASIM_PROFILE}/config.json"]
+    volumes: ["data:/data"]
+    networks:
+      upstream:
+        aliases: ["${MIRASIM_PROFILE_ALIAS:?Set MIRASIM_PROFILE_ALIAS}"]
+      egress: {}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  data:
+    external: true
+    name: ${MIRASIM_DATA_VOLUME:-mirasim-bridge_data}
+networks:
+  upstream:
+    external: true
+    name: ${SUB2API_NETWORK:?Set SUB2API_NETWORK}
+  egress: {}

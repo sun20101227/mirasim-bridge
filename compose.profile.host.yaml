@@ -1,0 +1,30 @@
+# Linux host networking: each profile must use a different loopback port.
+name: mirasim-profile-${MIRASIM_PROFILE:?Set MIRASIM_PROFILE}
+services:
+  bridge:
+    image: mirasim-bridge:local
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 180s
+    network_mode: host
+    environment:
+      MIRASIM_CONFIG: /data/profiles/${MIRASIM_PROFILE}/config.json
+    command: ["serve", "--config", "/data/profiles/${MIRASIM_PROFILE}/config.json"]
+    volumes: ["data:/data"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  data:
+    external: true
+    name: ${MIRASIM_DATA_VOLUME:-mirasim-bridge_data}

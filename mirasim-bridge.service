@@ -1,0 +1,46 @@
+[Unit]
+Description=mirasim-bridge (Mirasim 额度 → sub2api 桥接器)
+Documentation=file:///opt/mirasim-bridge/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# session 后端必须与 Mirasim 进程同一个用户；relay 后端只需凭证文件权限。
+# 端口发现要读 /proc/<pid>/fd，凭证采集要读该用户的临时 settings 文件——
+# 跑成别的用户会全线 EACCES，现象和「Mirasim 没启动」一模一样（DESIGN.md §11 Linux 就绪度）。
+User=mirasim
+Group=mirasim
+
+WorkingDirectory=/opt/mirasim-bridge
+Environment=HOME=/var/lib/mirasim
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+ExecStart=/usr/bin/node /opt/mirasim-bridge/mirasim-bridge.js serve
+
+# 优雅退出：桥接器收到 SIGTERM 后会先向 sub2api 发 PAUSE 摘流量，
+# 再 drain 在途请求（受 shutdown.drain_timeout_sec 约束），最后才退。
+# TimeoutStopSec 必须大于 drain_timeout_sec，否则 systemd 会在摘干净之前 SIGKILL，
+# 部署窗口内 sub2api 继续往死端点打，直接产生用户可见 5xx（DESIGN.md §7-8）。
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=180
+
+Restart=on-failure
+RestartSec=10
+
+# session 保活器要 spawn `node server.cjs claude`，别用 PrivateTmp——
+# Mirasim 把凭证写在 /tmp/mirasim-claude-settings-*.json，隔离了就读不到。
+PrivateTmp=no
+
+# 适度加固；注意不要开 ProtectProc/ProtectHome，会挡掉 /proc 反查与 ~/.mirasim 读取
+NoNewPrivileges=yes
+ProtectSystem=full
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mirasim-bridge
+
+[Install]
+WantedBy=multi-user.target

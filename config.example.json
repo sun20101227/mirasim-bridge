@@ -1,0 +1,90 @@
+{
+  "backend": "relay",
+  "relay": {
+    "url": "https://relay.mirasim.ai",
+    "auth_url": "https://auth.mirasim.ai",
+    "setting_json": "",
+    "client_version": "0.0.354",
+    "collect": false,
+    "locale": "",
+    "seal_public_key": ""
+  },
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "sub2api": {
+    "base_url": "https://api.example.com",
+    "admin_api_key": "",
+    "account_name": "mirasim-cloud",
+    "group_ids": [],
+    "priority": 0,
+    "concurrency": 2,
+    "public_base_url": "",
+    "manage_existing_groups": false
+  },
+  "bridge_secret": "",
+  "quota": { "enabled": true, "interval_sec": 300, "sync_notes": true },
+  "diagnostics": { "timeout_sec": 30, "max_tokens": 128 },
+  "health": {
+    "interval_sec": 30,
+    "fail_threshold": 2,
+    "success_threshold": 2,
+    "min_dwell_sec": 60
+  },
+  "forward": {
+    "replay_buffer_mb": 8,
+    "max_concurrency": 2,
+    "kimi_max_concurrency": 1,
+    "log_failures": false,
+    "failure_log": "requests.log",
+    "upstream_headers_timeout_ms": 60000,
+    "upstream_idle_timeout_ms": 300000
+  },
+  "backoff": {
+    "on_429_sec": 60,
+    "on_529_sec": 30,
+    "max_sec": 600
+  },
+  "constraints": {
+    "sampling_models": "",
+    "model_filter": "^(claude-|gpt-|deepseek-|kimi-)",
+    "model_block": "fable",
+    "default_max_tokens": 8192,
+    "disabled_models": ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"],
+    "kimi_default_effort": "low"
+  },
+  "keepalive": {
+    "enabled": true,
+    "server_cjs": "",
+    "respawn_backoff_sec": [
+      5,
+      15,
+      45,
+      120,
+      300
+    ],
+    "ready_timeout_sec": 60,
+    "authfail_respawn_threshold": 3
+  },
+  "shutdown": {
+    "drain_timeout_sec": 30,
+    "total_timeout_sec": 150
+  },
+  "port_policy": "sticky",
+  "discovery": {
+    "process_match": [
+      "mirasim"
+    ],
+    "probe_timeout_ms": 5000,
+    "probe_concurrency": 16,
+    "probe_path": "/v1/models"
+  },
+  "observe": {
+    "interval_sec": 5,
+    "out": "timeline.jsonl",
+    "heartbeat_sec": 300,
+    "log_all_ports": true,
+    "track_agents": true
+  }
+}
