@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css')}
-OPERATIONS = {'status', 'summary', 'models', 'model', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status'}
+OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status'}
 
 
 def command_input(args, data, timeout=55):
@@ -36,12 +36,23 @@ class Console:
         except (OSError, ValueError):
             pass
         self.event_lock = threading.Lock()
+        self.release_cache, self.release_lock = None, threading.Lock()
 
     def audit(self, action, target, ok):
         with self.event_lock:
             self.events.append({'at': int(time.time()), 'action': action, 'target': target, 'ok': ok})
             self.events = self.events[-100:]
             self.persist(self.audit_file, self.events)
+
+    def check_release(self):
+        # Read-only: the fixed manifest URL from the host config; cached so the page cannot hammer GitHub.
+        with self.release_lock:
+            if self.release_cache and time.monotonic() - self.release_cache[0] < 60:
+                return self.release_cache[1]
+            manifest = self.agent.fetch(self.agent.cfg['manifest_url'], self.agent.cfg['image_repository'])
+            result = {'latest': manifest['version'], 'checked_at': int(time.time())}
+            self.release_cache = (time.monotonic(), result)
+            return result
 
     def target(self, name):
         return next((t for t in self.agent.targets if t['name'] == name), None)
@@ -138,6 +149,11 @@ class Console:
             return self.agent.status()
         if op == 'events':
             return self.events[-50:]
+        if op == 'release/check':
+            try:
+                return self.check_release()
+            except Exception:
+                raise ValueError('Release manifest unavailable') from None
         if op in ('deploy', 'rollback'):
             accepted = self.agent.start(recover=op == 'rollback')
             self.audit(op, 'all', accepted)
@@ -212,14 +228,17 @@ def handler(agent, token, fallback, persist):
             if self.path != '/panel/api':
                 return super().do_POST()
             if self.headers.get('Origin') != origin or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                self.discard_body()
                 return self.panel_reply(403, {'error': 'Origin or content type rejected'})
             with auth_lock:
                 failures[:] = [t for t in failures if time.monotonic() - t < 60]
                 if len(failures) >= 20:
+                    self.discard_body()
                     return self.panel_reply(429, {'error': 'Too many login attempts; wait one minute'})
                 key = self.headers.get('X-Panel-Key', '')
                 if len(self.headers.get_all('X-Panel-Key', [])) != 1 or not hmac.compare_digest(key.encode(), token.encode()):
                     failures.append(time.monotonic())
+                    self.discard_body()
                     return self.panel_reply(401, {'error': 'Invalid panel key'})
             try:
                 lengths = self.headers.get_all('Content-Length', [])

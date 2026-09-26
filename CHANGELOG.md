@@ -1,5 +1,30 @@
 # 变更记录
 
+## 0.7.2 — 2026-09-26
+
+- **Claude 身份提示词只注入 Claude 模型**：实测 relay 只对 Claude 强制要求。此前给所有模型注入，导致 `gpt-6-astra` 等 GPT 模型、Kimi 自称 Claude Code。若 relay 对其他模型也返回“rejected as invalid”，会自动注入后重试一次。可用 `constraints.cc_identity_models` 调整。
+- **识别模型替换**：比较请求模型与响应 `model` 字段（规则与桌面客户端一致），统计替换次数并记录最近一次。`constraints.model_fallback=forbid` 时，在发出任何字节前中断被替换的轮次。检测方法和结果见 VERIFY.md。
+- **Codex 专用账号（可选）**：`sub2api.openai_account` 会自动注册一个 platform=openai 账号，只映射 GPT 模型。sub2api 原样转发 `/v1/responses`，不再经过 Responses→Messages 转换，Codex 的工具和审批参数可以完整保留。见 CODEX.md。
+- **安全加固**：
+  - 必须配置非空 `bridge_secret`。
+  - session 后端只放行 Messages/models 路径。
+  - 面板新增账号时，注册地址只能是本机或同一 Docker 网络。
+  - 面板写配置只改磁盘上的对应字段，不写入环境变量注入的密钥。
+  - 转发前移除 cookie、x-panel-key 和 proxy-authorization。
+  - 宿主机服务限制并发连接数；拒绝请求前先读完小请求体，避免对方收到 TCP 重置而看不到错误信息。
+- **网页后台**：
+  - 重新设计，支持深色模式和手机。
+  - 额度按剩余比例变色，显示相对时间。
+  - 新增请求统计、模型替换记录、Codex 账号状态。
+  - 可按账号实时调整并发（不需重启）和模型替换策略。
+  - 可按系列批量启停模型，版本页可检查更新。
+- 修复面板请求体按分片解码可能拆坏中文的问题。修复 0.7.2 开发中引入的账号名校验错误，并增加回归测试。
+- 验证：
+  - 通过：114 项 Node 测试、67 项自测、20 项 Python 测试，以及桌面、手机、深色模式截图。
+  - 本机真实调用：Claude 与 Kimi。
+  - 需在服务器验收：GPT 原生 Responses 路径、Codex 权限模式。
+- **升级提示**：网页和宿主机服务需重新运行 `install-panel.py`（见 PANEL.md）；只升级 bridge 镜像不会更新它们。
+
 ## 0.7.1 — 2026-09-25
 
 - 修复上游空 SSE 流被提前返回为 HTTP 200 的问题：收到可识别的协议事件后才开始下发流；空流、初始错误、协议不匹配、首事件超时返回明确 503。

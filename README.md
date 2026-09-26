@@ -1,8 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.7.1**，支持网页管理、网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.7.2**，支持网页管理、网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
 
-0.7.1 修复 SSE 空流/断流被掩盖为成功响应的问题，排查方式见 [STREAM-TROUBLESHOOTING.md](STREAM-TROUBLESHOOTING.md)。这不是 OpenAI Chat Completions 转换功能；客户端协议仍需正确配置。
+0.7.2 只对 Claude 模型注入 Claude Code 身份提示词（GPT/Kimi 不再自称 Claude Code），识别 relay 的模型替换，并新增 Codex 专用 openai 账号：[CODEX.md](CODEX.md) · 检测报告 [VERIFY.md](VERIFY.md)。流式排障见 [STREAM-TROUBLESHOOTING.md](STREAM-TROUBLESHOOTING.md)。这不是 OpenAI Chat Completions 转换功能；客户端协议仍需正确配置。
 
 **无需 SSH，在对话或 GitHub 里触发升级：**见 [REMOTE-CONTROL.md](REMOTE-CONTROL.md)。服务器主动读取升级指令，无需公网管理端口。已安装的旧版部署工具需要通过云厂商网页终端/服务器面板更新一次；这里不能凭空接入一个没有远程控制通道的服务器。
 

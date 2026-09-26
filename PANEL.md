@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.7.0）
+# Mira 网页管理后台（0.7.2）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -6,19 +6,21 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 
 ## 1. 已装部署工具：通过网页终端安装一次后台
 
+**从 0.7.0/0.7.1 升级到 0.7.2 也要执行这一步**：网页文件和宿主机服务装在 `/opt/mirasim-deploy`，只升级 bridge 镜像不会更新它们。安装器会保留现有管理密钥，重复执行是安全的。
+
 在云厂商网页终端、宝塔/1Panel **宿主机终端**执行。前提是现有 bridge 和 `mirasim-deploy.service` 已按 NETWORK-DEPLOY.md 安装。把最后的域名改成你的真实域名，必须为 HTTPS，末尾不要加 `/`。
 
 ```bash
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.0/mirasim-bridge-0.7.0-source.zip \
-  -o mirasim-bridge-0.7.0-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.2/mirasim-bridge-0.7.2-source.zip \
+  -o mirasim-bridge-0.7.2-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.0/mirasim-bridge-0.7.0-source.zip.sha256 \
-  -o mirasim-bridge-0.7.0-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.7.0-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.7.0-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.2/mirasim-bridge-0.7.2-source.zip.sha256 \
+  -o mirasim-bridge-0.7.2-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.7.2-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.7.2-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 

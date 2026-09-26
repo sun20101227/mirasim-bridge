@@ -16,6 +16,42 @@ from urllib.request import HTTPRedirectHandler, build_opener
 
 LOCAL_IMAGE = 'mirasim-bridge:local'
 ACTIVE = {'checking', 'pulling', 'activating', 'rolling_back'}
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """Bound live sockets/threads before even reading unauthenticated headers."""
+    daemon_threads = True
+    request_queue_size = 32
+
+    def __init__(self, address, handler_class, max_workers=32):
+        if type(max_workers) is not int or not 1 <= max_workers <= 128:
+            raise ValueError('Invalid HTTP worker limit')
+        self.slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(address, handler_class)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.2)
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            self.shutdown_request(request)
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
 READY_JS = r"""
 const fs=require('fs'), http=require('http');
 const c=JSON.parse(fs.readFileSync(process.env.MIRASIM_CONFIG||'/data/config.json','utf8'));
@@ -326,6 +362,17 @@ def handler(agent, token):
         def log_message(self, *_):
             pass
 
+        def discard_body(self, limit=16384):
+            # Closing a socket with unread request bytes sends a TCP reset, which can reach the
+            # client before the error reply. Drain small bodies; close the connection either way.
+            self.close_connection = True
+            length = self.headers.get('Content-Length', '')
+            if not self.headers.get('Transfer-Encoding') and length.isdigit() and int(length) <= limit:
+                try:
+                    self.rfile.read(int(length))
+                except OSError:
+                    pass
+
         def reply(self, code, data):
             raw = json.dumps(data).encode()
             self.send_response(code)
@@ -338,6 +385,7 @@ def handler(agent, token):
         def authorized(self):
             provided = self.headers.get('Authorization', '').encode()
             if len(self.headers.get_all('Authorization', [])) != 1 or not hmac.compare_digest(provided, ('Bearer ' + token).encode()):
+                self.discard_body()
                 self.reply(401, {'error': 'unauthorized'})
                 return False
             return True
@@ -350,9 +398,11 @@ def handler(agent, token):
             if not self.authorized():
                 return
             if self.path not in ('/v1/deploy', '/v1/deploy/rollback'):
+                self.discard_body()
                 return self.reply(404, {'error': 'not found'})
             # The caller cannot supply commands, images, paths, or download URLs.
             if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length', '0') not in ('0', '2'):
+                self.discard_body()
                 return self.reply(400, {'error': 'only an empty body or {} is accepted'})
             if self.headers.get('Content-Length') == '2' and self.rfile.read(2) != b'{}':
                 return self.reply(400, {'error': 'only {} is accepted'})
@@ -384,7 +434,7 @@ def serve(config):
         if not re.fullmatch(r'[a-f0-9]{64}', panel_token):
             raise ValueError('Invalid panel key')
         selected = module.handler(agent, panel_token, selected, atomic_json)
-    server = ThreadingHTTPServer(('127.0.0.1', config.get('port', 8790)), selected)
+    server = BoundedHTTPServer(('127.0.0.1', config.get('port', 8790)), selected)
     if agent.state.get('phase') in ('activating', 'rolling_back'):
         agent.start(recover=True)
     elif agent.state.get('phase') in ACTIVE:

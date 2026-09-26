@@ -41,6 +41,23 @@ class PanelHostTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
+    def test_release_check_is_cached_readonly_and_hides_errors(self):
+        calls = []
+        def fetch(url, repository):
+            calls.append((url, repository))
+            return {'version': '9.9.9', 'image': repository + '@sha256:' + '0' * 64}
+        self.agent.fetch = fetch
+        console = p.Console(self.agent, m.atomic_json)
+        self.assertEqual(console.call({'operation': 'release/check'})['latest'], '9.9.9')
+        self.assertEqual(console.call({'operation': 'release/check'})['latest'], '9.9.9')
+        self.assertEqual(len(calls), 1, 'second check within 60 s is served from cache')
+        self.assertEqual(calls[0][0], self.agent.cfg['manifest_url'])
+        self.assertFalse(self.fixture.calls, 'no Docker command is run')
+        console.release_cache = None
+        self.agent.fetch = lambda *_: (_ for _ in ()).throw(OSError('network detail'))
+        with self.assertRaisesRegex(ValueError, 'Release manifest unavailable'):
+            console.call({'operation': 'release/check'})
+
     def test_bridge_input_uses_stdin_and_only_selected_target(self):
         calls = []
         console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append((argv, data)) or {})

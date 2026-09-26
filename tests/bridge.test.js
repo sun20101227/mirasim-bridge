@@ -169,13 +169,20 @@ test('HTTP forwarding and cancellation', { timeout: 15000 }, async (t) => {
       assert.equal((await call()).status, 503);
       await delay(20); assert.equal(ctx.inflight, 0);
     });
+    await t.test('session backend is not a generic proxy onto the local Mirasim server', async () => {
+      const before = calls;
+      for (const [url, body] of [['/api/shell', { cmd: 'x' }], ['/v1/complete', payload], ['/auth/me', null], ['/v1/messages', null]]) {
+        assert.equal((await call(url, body)).status, 400);
+      }
+      assert.equal(calls, before);
+    });
     await t.test('client cancellation destroys upstream SSE and releases concurrency', async () => {
       mode = 'stream'; prime();
       await new Promise((resolve, reject) => {
-        const req = http.get({ host: '127.0.0.1', port, path: '/v1/messages', headers: { 'x-api-key': 'test-secret' } }, (res) => {
+        const req = http.request({ host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { 'x-api-key': 'test-secret', 'content-type': 'application/json' } }, (res) => {
           res.once('data', () => { res.destroy(); resolve(); });
         });
-        req.on('error', reject);
+        req.on('error', reject); req.end(JSON.stringify(payload));
       });
       for (let n = 0; n < 30 && (!disconnected || ctx.inflight); n++) await delay(10);
       assert.equal(disconnected, true); assert.equal(ctx.inflight, 0);

@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -60,6 +60,9 @@ const DEFAULT_CONFIG = {
     concurrency: 2,
     public_base_url: '',
     manage_existing_groups: false,
+    // Codex 专用账号：platform=openai，sub2api 原样转发 /v1/responses 给桥接器（不经 Responses→Messages 转换、
+    // 不注入 Claude 身份提示词）。需要 backend=relay，并放进一个 openai 平台分组。
+    openai_account: { enabled: false, account_name: '', group_ids: [] },
   },
   bridge_secret: '',
   quota: { enabled: true, interval_sec: 300, sync_notes: true },
@@ -93,6 +96,12 @@ const DEFAULT_CONFIG = {
     default_max_tokens: 8192,   // max_tokens 缺失 / 0 / 负数时回落到这个值
     disabled_models: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'],
     kimi_default_effort: 'low',
+    // relay 只对 Claude 模型强制要求 Claude Code 身份提示词（2026-09-26 实测：Kimi 不带也 200，
+    // GPT/DeepSeek 不带时回 503 而非 400）。给其他模型注入会让它们自称 "Claude Code"。
+    cc_identity_models: '^claude-',
+    // relay 在额度不足时可能用别的模型顶替本轮，并在响应的 model 字段里报告实际模型。
+    // observe：照常转发并计数；forbid：一旦被替换就中断本轮（返回 503，sub2api 会换号重试）。
+    model_fallback: 'observe',
   },
   keepalive: {
     enabled: true,
@@ -242,7 +251,14 @@ function validateConfig(cfg) {
       || cfg.keepalive.respawn_backoff_sec.some((n) => !Number.isFinite(n) || n < 1)) throw new Error('respawn_backoff_sec 必须是非空正数数组');
   if (!Array.isArray(cfg.sub2api.group_ids) || cfg.sub2api.group_ids.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('group_ids 必须是正整数数组');
   if (typeof cfg.sub2api.manage_existing_groups !== 'boolean') throw new Error('manage_existing_groups 必须是布尔值');
-  for (const key of ['model_filter', 'model_block', 'sampling_models']) {
+  const oa = cfg.sub2api.openai_account;
+  if (!isPlainObject(oa) || typeof oa.enabled !== 'boolean' || typeof oa.account_name !== 'string'
+      || !Array.isArray(oa.group_ids) || oa.group_ids.some((g) => !Number.isInteger(g) || g < 1)) {
+    throw new Error('sub2api.openai_account 需要 { enabled: 布尔, account_name: 字符串, group_ids: 正整数数组 }');
+  }
+  if (oa.enabled && (oa.account_name || `${cfg.sub2api.account_name}-codex`) === cfg.sub2api.account_name) throw new Error('Codex 账号名不能与主账号相同');
+  if (!['observe', 'forbid'].includes(cfg.constraints.model_fallback)) throw new Error('constraints.model_fallback 只能是 observe 或 forbid');
+  for (const key of ['model_filter', 'model_block', 'sampling_models', 'cc_identity_models']) {
     if (typeof cfg.constraints[key] !== 'string') throw new Error(`constraints.${key} 必须是字符串`);
     if (cfg.constraints[key]) new RegExp(cfg.constraints[key]);
   }
@@ -916,6 +932,43 @@ function hasCC(system) {
  * 幂等注入：客户端本身就是 Claude Code（body 里已有该块）时原样返回，
  * 不重复注入——否则白白多花 token，也可能触发上游异常。
  */
+// Same rule as the Mirasim desktop client: ignore vendor prefixes, "claude-", dates, "latest", and
+// accept a longer name only when it adds version digits to a name that had none (e.g. haiku → haiku-4-5).
+function modelTokens(name) {
+  let s = (typeof name === 'string' ? name : '').trim().toLowerCase();
+  if (!s || s === '<synthetic>') return [];
+  const parts = s.replace(/\[[^\]]*\]/g, '').replace(/^(?:[a-z0-9_-]+\.)+/, '').replace(/^claude-/, '')
+    .replace(/[:@].*$/, '').split(/[^a-z0-9]+/).filter(Boolean);
+  while (parts.length > 1 && /^(?:\d{6,}|latest|preview|v\d+)$/.test(parts[parts.length - 1])) parts.pop();
+  return parts;
+}
+function sameModel(a, b) {
+  const x = modelTokens(a), y = modelTokens(b);
+  if (!x.length || !y.length) return true;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  if (!short.every((t, i) => t === long[i])) return false;
+  const tail = long.slice(short.length);
+  if (!tail.length) return true;
+  return short.some((t) => /^\d+$/.test(t)) ? false : tail.every((t) => /^\d+$/.test(t));
+}
+/** 记录一次“请求 A、实际 B”的替换；返回 true 表示按 forbid 策略拒绝本轮。 */
+function noteServedModel(ctx, cfg, requested, served) {
+  if (!requested || !served || sameModel(requested, served)) return false;
+  ctx.counters.fallback = (ctx.counters.fallback || 0) + 1;
+  ctx.lastFallback = { requested: String(requested).slice(0, 160), served: String(served).slice(0, 160), at: new Date().toISOString() };
+  const forbid = cfg.constraints.model_fallback === 'forbid';
+  warn(`模型被替换：请求 ${ctx.lastFallback.requested}，实际 ${ctx.lastFallback.served}${forbid ? '（forbid：中断本轮）' : ''}`);
+  return forbid;
+}
+
+function needsCCIdentity(model, cfg) {
+  const pattern = cfg?.constraints?.cc_identity_models;
+  if (pattern === undefined || pattern === null) return true;
+  if (pattern === '') return false;
+  const re = compileRe(pattern);
+  return re ? re.test(String(model || '')) : true;
+}
+
 function injectCC(body) {
   if (!body || typeof body !== 'object') return body;
   const s = body.system;
@@ -1127,7 +1180,7 @@ function sanitizeMessagesRequest(body, cfg) {
     notes.push('max_tokens_defaulted');
   }
 
-  return { body: injectCC(body), notes, error: null };
+  return { body: needsCCIdentity(body.model, cfg) ? injectCC(body) : body, notes, error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,13 +1459,13 @@ const s2 = {
   listGroups: (cfg) => sub2apiRequest(cfg, 'GET', '/api/v1/admin/groups/all'),
 
   /** 按 name 精确查重（search 是模糊匹配，必须客户端再过滤一次） */
-  async findAccountByName(cfg, name) {
+  async findAccountByName(cfg, name, platform = 'anthropic') {
     const found = [];
     for (let page = 1; page <= 100; page++) {
-      const q = `?search=${encodeURIComponent(name)}&platform=anthropic&page_size=100&page=${page}`;
+      const q = `?search=${encodeURIComponent(name)}&platform=${encodeURIComponent(platform)}&page_size=100&page=${page}`;
       const data = await sub2apiRequest(cfg, 'GET', '/api/v1/admin/accounts' + q);
       if (!Array.isArray(data?.items)) throw new Error('sub2api account list has invalid shape');
-      found.push(...data.items.filter((a) => a.name === name));
+      found.push(...data.items.filter((a) => a.name === name && (!a.platform || a.platform === platform)));
       if (found.length > 1) throw new Error('sub2api 存在多个同名账号，请先改为唯一账号名');
       const total = Number(data.total ?? data.pagination?.total);
       if (data.items.length === 0 || (Number.isFinite(total) ? page * 100 >= total : data.items.length < 100)) return found[0] || null;
@@ -1439,13 +1492,13 @@ const s2 = {
  * GET /accounts/:id/models falls back to platform defaults when mapping is empty,
  * so a nonempty response there is NOT proof that live models were saved.
  */
-async function syncAccountModels(cfg, id, { beforeWrite = async () => {} } = {}) {
+async function syncAccountModels(cfg, id, { beforeWrite = async () => {}, account: managed = mainAccount(cfg) } = {}) {
   const catalog = await s2.syncModels(cfg, id);
   const models = [...new Set(catalogRows(catalog).map((m) => typeof m === 'string' ? m : m.id)
-    .filter((model) => isModelAllowed(model, cfg)))].sort();
+    .filter((model) => isModelAllowed(model, cfg) && (!managed.family || String(model).startsWith(managed.family))))].sort();
   if (!models.length) throw new Error('上游模型目录为空或没有允许的模型，不恢复调度');
   const account = await s2.getAccount(cfg, id);
-  if (account?.platform !== 'anthropic' || account?.type !== 'apikey' || account?.name !== cfg.sub2api.account_name) {
+  if (account?.platform !== managed.platform || account?.type !== 'apikey' || account?.name !== managed.name) {
     throw new Error('模型同步目标与受管账号不一致，拒绝修改');
   }
   const mapping = Object.fromEntries(models.map((model) => [model, model]));
@@ -1495,6 +1548,17 @@ async function refreshQuota(cfg, ctx, { force = false } = {}) {
 }
 
 /** 注册时用的 base_url：拓扑 B 填 public_base_url，否则指向本机固定端口 */
+/** 桥接器管理的 sub2api 账号。main 走 anthropic/Messages；codex 走 openai/Responses，只放 GPT。 */
+function managedAccounts(cfg) {
+  const list = [{ key: 'main', name: cfg.sub2api.account_name, groupIds: cfg.sub2api.group_ids || [], platform: 'anthropic', family: null, stateKey: null }];
+  const o = cfg.sub2api.openai_account || {};
+  if (o.enabled && cfg.backend === 'relay') {
+    list.push({ key: 'codex', name: o.account_name || `${cfg.sub2api.account_name}-codex`, groupIds: o.group_ids || [], platform: 'openai', family: 'gpt-', stateKey: 'codex' });
+  }
+  return list;
+}
+const mainAccount = (cfg) => managedAccounts(cfg)[0];
+
 function bridgeBaseUrl(cfg) {
   const pub = String(cfg.sub2api.public_base_url || '').trim();
   if (pub) return pub.replace(/\/+$/, '');
@@ -1681,6 +1745,7 @@ function fail503(res, reason) {
 }
 
 function createBridgeServer(cfg, ctx, secret, maxConc) {
+  if (typeof secret !== 'string' || !secret.trim()) throw new Error('bridge_secret 必须非空；回环监听也可能被反代到公网');
   const agent = new http.Agent({ keepAlive: true, maxSockets: Math.max(4, maxConc * 2) });
   const replayLimit = cfg.forward.replay_buffer_mb * 1024 * 1024;
 
@@ -1707,10 +1772,12 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
       catch { return fail503(res, 'status unavailable'); }
     }
 
-    // --- 并发闸门 ---
-    if (ctx.inflight >= maxConc) {
+    // --- 并发闸门 --- 读当前配置：网页后台可在运行中调整上限
+    const limit = Math.max(1, cfg.forward.max_concurrency);
+    agent.maxSockets = Math.max(4, limit * 2);
+    if (ctx.inflight >= limit) {
       ctx.counters.rejected++;
-      return fail503(res, `over concurrency limit (${maxConc})`);
+      return fail503(res, `over concurrency limit (${limit})`);
     }
 
     // --- 退避期 ---
@@ -1766,6 +1833,8 @@ function handleInternal(req, res, cfg, ctx) {
       relay: target?.relay ? { ready: target.relay.ready } : undefined,
       quota: ctx.quota || { available: false, stale: true },
       last_stream_error: ctx.lastStreamError || null,
+      last_fallback: ctx.lastFallback || null,
+      model_fallback: cfg.constraints.model_fallback,
       disabled_models: cfg.constraints.disabled_models,
       sub2api: {
         managed: Boolean(ctx.sm),
@@ -1773,6 +1842,7 @@ function handleInternal(req, res, cfg, ctx) {
         schedulable: ctx.sm ? ctx.sm.desired : 'unmanaged',
         account_id: ctx.sm?.accountId || null,
       },
+      sub2api_codex: ctx.codex?.sm ? { managed: true, reachable: Boolean(ctx.codex.reachable), schedulable: ctx.codex.sm.desired, account_id: ctx.codex.sm.accountId } : { managed: false },
       uptime_sec: Math.round((Date.now() - ctx.startedAt) / 1000),
       target: target ? { port: target.port, token_fp: target.token_fp, is_keepalive: target.is_keepalive } : null,
       keepalive: ctx.keepalive
@@ -1936,6 +2006,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     upstreamPath = wirePath + (req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : '');
   }
   if (isResponses && !target.relay) return fail400(res, { message: 'Responses 需要 backend=relay；session 后端仅支持 Messages' });
+  if (!target.relay && !(req.method === 'GET' && wirePath === '/v1/models')
+      && !(req.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(wirePath))) {
+    return fail400(res, { message: 'session 后端仅支持 POST /v1/messages、/v1/messages/count_tokens 与 GET /v1/models' });
+  }
   if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') {
     return fail400(res, { message: '不支持压缩请求体，请发送未压缩 JSON' });
   }
@@ -1965,7 +2039,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     try { parsed = JSON.parse(body.toString('utf8')); } catch { /* 下面统一返回本地 400 */ }
     if (!isPlainObject(parsed)) return fail400(res, { message: '请求体必须是 JSON 对象' });
     if (parsed) {
-      if (!hasCC(parsed.system)) ctx.counters.injected++;
+      if (!hasCC(parsed.system) && needsCCIdentity(parsed.model, cfg)) ctx.counters.injected++;
       const { body: cleaned, notes, error } = sanitizeMessagesRequest(parsed, cfg);
       if (error) {
         ctx.counters.err++;
@@ -1992,7 +2066,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     const lk = k.toLowerCase();
     if (HOP_BY_HOP.has(lk)) continue;
     if (lk === 'host' || lk === 'content-length') continue;   // 自己重写
-    if (lk === 'x-api-key' || lk === 'authorization' || lk.startsWith('x-mirasim-')) continue;
+    if (['x-api-key', 'authorization', 'x-panel-key', 'cookie', 'proxy-authorization'].includes(lk) || lk.startsWith('x-mirasim-')) continue;
     headers[k] = v;
   }
   if (!target.relay) {
@@ -2022,13 +2096,20 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     return fail503(res, `upstream error: ${err.code || err.message}`);
   }
 
-  if (upRes.statusCode === 400 && hadSampling && cleanBody) {
+  const missingCC = cleanBody && pathname === '/v1/messages' && !hasCC(cleanBody.system);
+  if (upRes.statusCode === 400 && cleanBody && (hadSampling || missingCC)) {
     const firstError = await readStreamText(upRes);
-    // 仅在明确指出采样参数时重试一次，含混 400 不自动重放。
-    if (/temperature|top_p|top_k/i.test(firstError) && !/credit balance/i.test(firstError)) {
+    if (hadSampling && /temperature|top_p|top_k/i.test(firstError) && !/credit balance/i.test(firstError)) {
+      // 仅在明确指出采样参数时重试一次，含混 400 不自动重放。
       delete cleanBody.temperature; delete cleanBody.top_p; delete cleanBody.top_k;
       upRes = await sendOnce(Buffer.from(JSON.stringify(cleanBody)));
       ctx.counters.sampling_retried++;
+    } else if (missingCC && /rejected as invalid/i.test(firstError)) {
+      // relay 若日后也要求非 Claude 模型带身份块，这里自愈一次，而不是让请求失败。
+      cleanBody = injectCC(cleanBody);
+      upRes = await sendOnce(Buffer.from(JSON.stringify(cleanBody)));
+      ctx.counters.cc_retried = (ctx.counters.cc_retried || 0) + 1;
+      warn(`${cleanBody.model} 未带身份提示词被拒，已注入后重试（考虑把它加入 constraints.cc_identity_models）`);
     } else {
       if (/credit balance/i.test(firstError)) {
         ctx.backoffUntil = Math.max(ctx.backoffUntil, Date.now() + cfg.backoff.max_sec * 1000);
@@ -2115,6 +2196,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
 
   if (status === 200 && wirePath === '/v1/responses' && !responsesStream) {
     const response = aggregateResponses(await readStreamText(upRes));
+    if (noteServedModel(ctx, cfg, cleanBody?.model, response.model)) {
+      ctx.counters.err++;
+      return fail503(res, 'upstream_stream_model_fallback');
+    }
     const out = Buffer.from(JSON.stringify(response));
     ctx.counters.ok++;
     res.writeHead(200, mergedHeaders(upRes.headers, { 'content-type': 'application/json', 'content-length': out.length }));
@@ -2140,6 +2225,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
       const ok = await pipeEvents(upRes, res, kind, {
         begin: () => res.writeHead(status, eventHeaders),
         firstEventTimeoutMs: cfg.forward.upstream_headers_timeout_ms,
+        onServed: (served) => noteServedModel(ctx, cfg, cleanBody?.model, served),
       });
       if (ok) ctx.counters.ok++;
       else { ctx.counters.err++; record('upstream_stream_error'); }
@@ -2879,9 +2965,8 @@ function createShutdownHandler(cfg, ctx, { server, registration, stopHealth, exi
     deadlineTimer = setTimeout(() => finish(true), cfg.shutdown.total_timeout_sec * 1000);
     await Promise.race([Promise.resolve().then(registration).catch(() => {}), done]);
     if (finished) return;
-    if (ctx.sm) {
-      await Promise.race([ctx.sm.pause('优雅退出').catch((e) => warn(`PAUSE 失败：${e.message}`)), done]);
-    }
+    const pauses = [ctx.sm, ctx.codex?.sm].filter(Boolean).map((sm) => sm.pause('优雅退出').catch((e) => warn(`PAUSE 失败：${e.message}`)));
+    if (pauses.length) await Promise.race([Promise.all(pauses), done]);
     if (finished) return;
     const drainUntil = Date.now() + cfg.shutdown.drain_timeout_sec * 1000;
     while (!finished && ctx.inflight > 0 && Date.now() < drainUntil) await Promise.race([new Promise((r) => setTimeout(r, 100)), done]);
@@ -2895,16 +2980,19 @@ async function cmdServe(cfg, args) {
   cfg.listen = { host, port };
   validateConfig(cfg);
   const secret = cfg.bridge_secret || '';
-  if (!secret && !['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('非回环监听必须配置 bridge_secret');
+  if (!secret.trim()) throw new Error('必须配置非空 bridge_secret（包括回环监听），防止经反代暴露无鉴权接口');
   const maxConc = Math.max(1, cfg.forward.max_concurrency);
 
   const ctx = {
     keepalive: null,
+    codex: { sm: null, reachable: false },
     inflight: 0,
     queue: [],
     counters: {
       total: 0, ok: 0, err: 0, rejected: 0, injected: 0,
-      sampling_retried: 0,      // 采样参数被上游拒后剥离重试成功的次数（§1.2）
+      sampling_retried: 0,
+      cc_retried: 0,            // 非 Claude 模型未带身份块被拒、注入后重试的次数
+      fallback: 0,              // relay 用其他模型顶替本轮的次数（响应 model 与请求不同）      // 采样参数被上游拒后剥离重试成功的次数（§1.2）
       models_filtered: 0,       // /v1/models 响应里被白名单/黑名单滤掉的模型数
       sanitized: {},            // 约束清洗动作计数，键见 sanitizeMessagesRequest 的 notes
     },
@@ -2957,6 +3045,21 @@ async function cmdServe(cfg, args) {
   if (ctx.shuttingDown) return;
 
   // --- sub2api 接入 ---
+  const codexAccount = managedAccounts(cfg).find((a) => a.key === 'codex');
+  if (cfg.sub2api.openai_account?.enabled && !codexAccount) warn('openai_account 需要 backend=relay（Responses 只在直连 relay 时可用），已跳过 Codex 账号。');
+  const registerCodex = async () => {
+    if (!codexAccount || ctx.codex.sm || ctx.shuttingDown) return;
+    try {
+      const reg = await cmdRegister(cfg, args, codexAccount);
+      if (reg && reg.id) {
+        ctx.codex.sm = new ScheduleState(cfg, reg.id);
+        ctx.codex.reachable = Boolean(reg.reachable);
+        log(`Codex 账号状态机就绪 account_id=${reg.id}（platform=openai）`);
+      }
+    } catch (err) {
+      warn(`Codex 账号注册失败：${err.message}`);
+    }
+  };
   const registerAccount = async () => {
   if (withSub2api) {
     try {
@@ -2974,6 +3077,7 @@ async function cmdServe(cfg, args) {
       warn(`sub2api 注册失败：${err.message}`);
       warn('转发层照常工作，但账号不会自动进出池。修好后可单独跑 `register`。');
     }
+    await registerCodex();
   } else {
     log('未接入 sub2api（缺 base_url/admin_api_key 或指定了 --no-register）');
   }
@@ -3000,6 +3104,8 @@ async function cmdServe(cfg, args) {
         if (ctx.shuttingDown) return;
         registration = registerAccount();
         await registration;
+      } else if (withSub2api && ctx.sm && codexAccount && !ctx.codex.sm && tickCount % RECHECK_EVERY === 0) {
+        await registerCodex();
       }
       const t = resolveTarget(cfg, {
         preferPid: ctx.keepalive ? ctx.keepalive.pid : null, maxAgeMs: 0,
@@ -3033,6 +3139,19 @@ async function cmdServe(cfg, args) {
         }
       }
 
+      const codex = ctx.codex;
+      if (codex.sm && forwardOk && (!codex.reachable || tickCount % RECHECK_EVERY === 0)) {
+        try {
+          const synced = await syncAccountModels(cfg, codex.sm.accountId, {
+            account: codexAccount, beforeWrite: () => codex.sm.pause('更新 Codex 模型映射'),
+          });
+          codex.reachable = synced.models.length > 0;
+        } catch (err) {
+          codex.reachable = false;
+          log(`Codex 账号反向可达性未通过：${err.message}`);
+        }
+      }
+
       if (ctx.shuttingDown) return;
       try { await refreshQuota(cfg, ctx); } catch (err) { warn(`额度备注同步失败：${err.message}`); }
       if (ctx.shuttingDown) return;
@@ -3040,10 +3159,12 @@ async function cmdServe(cfg, args) {
         && (!ctx.keepalive || ctx.keepalive.ready);
       ctx.lastHealthy = healthy;
       if (ctx.sm) await ctx.sm.onProbe(healthy);
+      if (codex.sm) await codex.sm.onProbe(forwardOk && codex.reachable && Date.now() >= ctx.backoffUntil);
     } catch (err) {
       warn(`健康循环异常：${err.message}`);
       ctx.lastHealthy = false;
       if (ctx.sm && !ctx.shuttingDown) await ctx.sm.onProbe(false);
+      if (ctx.codex.sm && !ctx.shuttingDown) await ctx.codex.sm.onProbe(false);
     } finally {
       running = false;
     }
@@ -3077,10 +3198,12 @@ async function cmdGroups(cfg, args) {
  * register：幂等注册。按 name 查重 → 建或改 → **以 sync-upstream 收尾**。
  * 最后那步不能省：账号模型列表为空 → 调度时被 isModelSupportedByAccount 过滤 → 零流量（§2.3a）。
  */
-async function cmdRegister(cfg, args) {
-  const name = cfg.sub2api.account_name;
+async function cmdRegister(cfg, args, account = mainAccount(cfg)) {
+  const name = account.name;
   const baseUrl = bridgeBaseUrl(cfg);
-  const groupIds = cfg.sub2api.group_ids || [];
+  const groupIds = account.groupIds;
+  // codex 账号的状态放在 state.json 的子键下，不覆盖主账号记录
+  const remember = (patch) => saveState(cfg, account.stateKey ? { [account.stateKey]: { ...(loadState(cfg)[account.stateKey] || {}), ...patch } } : patch);
 
   if (!groupIds.length && !args.flags.force) {
     throw new Error('sub2api.group_ids 为空。账号不属于任何分组就不会被调度——' +
@@ -3104,7 +3227,7 @@ async function cmdRegister(cfg, args) {
     warn('管理地址使用域名，注册地址使用回环：仅凭域名无法判断是否同机。账号保持暂停，等待 sync-upstream 验证可达性。');
   }
 
-  const existing = await s2.findAccountByName(cfg, name);
+  const existing = await s2.findAccountByName(cfg, name, account.platform);
   let id;
 
   if (existing) {
@@ -3123,7 +3246,7 @@ async function cmdRegister(cfg, args) {
     log('账号不存在，创建');
     const created = await s2.createAccount(cfg, {
       name,
-      platform: 'anthropic',
+      platform: account.platform,
       type: 'apikey',
       credentials: { api_key: cfg.bridge_secret || 'no-auth', base_url: baseUrl },
       extra: {},
@@ -3137,13 +3260,13 @@ async function cmdRegister(cfg, args) {
     });
     id = created && created.id;
     if (!id) throw new Error('建号响应缺少 id');
-    saveState(cfg, { account_id: id, account_name: name, base_url: baseUrl });
+    remember({ account_id: id, account_name: name, base_url: baseUrl });
     await s2.setSchedulable(cfg, id, false);
     if (groupIds.length) await s2.updateAccount(cfg, id, { group_ids: groupIds });
     log(`账号已创建 id=${id}`);
   }
 
-  saveState(cfg, { account_id: id, account_name: name, base_url: baseUrl });
+  remember({ account_id: id, account_name: name, base_url: baseUrl });
 
   // 收尾：拉真实模型列表（§2.3a）。
   //
@@ -3153,7 +3276,7 @@ async function cmdRegister(cfg, args) {
   log('同步上游模型列表（sync-upstream，同时验证 sub2api → 桥接器 反向可达）…');
   let reachable = false;
   try {
-    const { models: list } = await syncAccountModels(cfg, id);
+    const { models: list } = await syncAccountModels(cfg, id, { account });
     log(`模型列表 ${list.length} 个：${list.map((m) => m.model_id || m.id || m).slice(0, 12).join(', ')}`);
     if (list.length) {
       reachable = true;
@@ -3175,7 +3298,7 @@ async function cmdRegister(cfg, args) {
     }
   }
 
-  saveState(cfg, { account_id: id, reachable });
+  remember({ account_id: id, reachable });
   return { id, reachable };
 }
 
@@ -3568,7 +3691,7 @@ async function main() {
 }
 
 if (require.main === module) main().catch((err) => fatal(err && err.stack ? err.stack : String(err)));
-module.exports = { VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
+module.exports = { managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
   modelFamily, isModelAllowed, summarizeModelResponse, diagnosticTarget, diagnosticRequest,

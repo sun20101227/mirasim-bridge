@@ -28,7 +28,8 @@ $sourceFiles = @(
     'scripts/deploy-agent.py', 'tests/test_network_deploy.py', 'NETWORK-DEPLOY.md', '.github/workflows/publish.yml',
     'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md', 'PANEL.md',
     'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css',
-    'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md'
+    'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
+    'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

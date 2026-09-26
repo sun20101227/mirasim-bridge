@@ -15,7 +15,7 @@ async function main() {
   catch (err) { if (err.code !== 'EEXIST') throw err; }
   const key = fs.readFileSync(keyFile, 'utf8').trim();
   if (data.operation === 'panel-key') { process.stdout.write(JSON.stringify({ status: 200, data: { panel_key: key } })); return; }
-  if (!['status', 'summary', 'models', 'model', 'test', 'profiles', 'profile/info', 'groups', 'login/start', 'login/complete', 'login/status'].includes(data.operation)) throw Error('unknown operation');
+  if (!['status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'profile/info', 'groups', 'login/start', 'login/complete', 'login/status'].includes(data.operation)) throw Error('unknown operation');
   const body = JSON.stringify(data.data || {});
   const status = data.operation === 'status';
   const host = process.env.MIRASIM_LISTEN_HOST || cfg.listen.host;
