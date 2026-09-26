@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.8.1）
+# Mira 网页管理后台（0.8.3）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -14,13 +14,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.1/mirasim-bridge-0.8.1-source.zip \
-  -o mirasim-bridge-0.8.1-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.3/mirasim-bridge-0.8.3-source.zip \
+  -o mirasim-bridge-0.8.3-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.1/mirasim-bridge-0.8.1-source.zip.sha256 \
-  -o mirasim-bridge-0.8.1-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.1-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.1-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.3/mirasim-bridge-0.8.3-source.zip.sha256 \
+  -o mirasim-bridge-0.8.3-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.3-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.3-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
@@ -75,18 +75,18 @@ server {
 
 后台读的是服务器真实部署状态，不是 GitHub 工作流状态：
 
-- `succeeded`：桥接器已启动并恢复调度。
+- `succeeded`：桥接器已启动并通过本地版本/鉴权状态检查；上游与调度单独显示，手动暂停不会被强制恢复。
 - `failed`：发布准备失败，原运行容器未改变。
 - `rolled_back`：升级失败，已回退。
-- `rollback_failed`：回退未完成，需要查看宿主机日志并修复。
+- `rollback_failed`：回退未完成；新版可继续读取账号状态并显示具体失败步骤。旧后台锁定的恢复见 [RECOVERY.md](RECOVERY.md)。
 
 升级/回退只使用服务器已配置的发布源，网页不能输入镜像地址或命令。0.8.0 起升级同时更新宿主机工具：镜像内的 `deploy-agent.py`、`panel-host.py` 和网页文件先做语法校验，容器就绪后写入 `/opt/mirasim-deploy` 并备份旧版，最后重启部署服务（页面短暂断开，刷新后重新输入密钥）。回退会一并恢复上一版宿主机工具。状态里的 `host_updated / host_restart / host_restored` 说明这次是否动了宿主机。
 
-## 4. 邮箱验证码 / Google 添加新账号
+## 4. Google / GitHub 添加新账号
 
 1. “账号管理 → 新增账号”，填写唯一 profile、sub2 账号名，在下拉里选一个 anthropic/composite 分组（读不到分组列表时可手动填 ID）。
-2. 选择 **邮箱验证码**，输入邮箱，点击发送，然后输入邮件中的验证码。错误可重试，最多 5 次，发送间隔至少 60 秒。验证码由 Mirasim 发出。
-3. 或选择 **Google 授权**，在无痕窗口打开授权链接，完成后复制地址栏的最终回调 URL，粘贴到表单并验证。回调打不开属服务器登录的正常情况；不要把含 token 的地址发到聊天或日志。
+2. Profile 可留空自动生成；填写邮箱时会转为安全标识。邮箱验证码当前暂不可用，网页已禁用该选项。
+3. 选择 **Google 或 GitHub 授权**，在无痕窗口打开授权链接，完成后复制地址栏的最终回调 URL，粘贴到表单并验证。回调打不开属服务器登录的正常情况；不要把含 token 的地址发到聊天或日志。
 4. 保存成功后，原账号的凭证保持不变，新凭证保存在 `/data/profiles/名字/`。
 5. 默认勾选 **“托管到当前 bridge”**：保存后页面自动托管并注册到 sub2，不新建容器。取消勾选则走旧的独立容器流程（profiles 列表的“独立容器”按钮）。
 6. 在概览“全部 Mira 账号”确认调度为“已入池”。注册依赖已有的 sub2 管理 Key；同组共享池，不同组隔离调用。

@@ -30,7 +30,7 @@ $sourceFiles = @(
     'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/icon.png',
     'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
     'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js',
-    'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md'
+    'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md', 'tests/web-panel.test.js', 'scripts/verify-package.py', 'RECOVERY.md'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {
@@ -45,9 +45,13 @@ function Write-Bundle([string]$Name, [bool]$Private) {
     foreach ($relative in $sourceFiles) {
         $full = Join-Path $root $relative
         if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Missing project file: $relative" }
-        # Linux shell/systemd files must not contain Windows CRLF or BOM.
-        $text = [System.IO.File]::ReadAllText($full).Replace("`r`n", "`n").TrimStart([char]0xfeff)
-        $entries[$relative] = $utf8.GetBytes($text)
+        if ([System.IO.Path]::GetExtension($relative) -eq '.png') {
+            $entries[$relative] = [System.IO.File]::ReadAllBytes($full)
+        } else {
+            # Normalize text only: decoding a PNG as UTF-8 corrupts the logo.
+            $text = [System.IO.File]::ReadAllText($full).Replace("`r`n", "`n").TrimStart([char]0xfeff)
+            $entries[$relative] = $utf8.GetBytes($text)
+        }
     }
     if ($Private) {
         foreach ($full in @($SettingJson)) {

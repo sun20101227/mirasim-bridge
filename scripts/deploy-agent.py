@@ -61,14 +61,20 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
 READY_JS = r"""
 const fs=require('fs'), http=require('http');
-const c=JSON.parse(fs.readFileSync(process.env.MIRASIM_CONFIG||'/data/config.json','utf8'));
-let host=process.env.MIRASIM_LISTEN_HOST||c.listen.host;
+const c=JSON.parse(fs.readFileSync(process.env.MIRASIM_CONFIG||'/data/config.json','utf8').replace(/^\uFEFF/,''));
+let host=process.env.MIRASIM_LISTEN_HOST||c.listen?.host||'127.0.0.1';
 if(['0.0.0.0','::'].includes(host))host='127.0.0.1';
-const r=http.get({host,port:Number(process.env.MIRASIM_LISTEN_PORT||c.listen.port),path:'/__status',
+const r=http.get({host,port:Number(process.env.MIRASIM_LISTEN_PORT||c.listen?.port||8787),path:'/__status',
 headers:{'x-api-key':process.env.MIRASIM_BRIDGE_SECRET||c.bridge_secret}},res=>{
 let raw='';res.on('data',d=>{raw+=d;if(raw.length>1048576)r.destroy()});
-res.on('end',()=>{try{const s=JSON.parse(raw);process.exit(res.statusCode===200&&s.sub2api.managed&&
-s.sub2api.reachable&&s.sub2api.schedulable==='on'&&s.relay?.ready?0:1)}catch{process.exit(1)}});
+res.on('end',()=>{try{const s=JSON.parse(raw);
+if(res.statusCode!==200||!/^\d+\.\d+\.\d+$/.test(s.version)||!['relay','session'].includes(s.backend))return process.exit(1);
+// A release must start a working bridge. Upstream capacity, manual pause and sub2
+// connectivity are separate operational states, not reasons to roll back its code.
+console.log(JSON.stringify({version:s.version,backend:s.backend,managed:!!s.sub2api?.managed,
+reachable:!!s.sub2api?.reachable,schedulable:['on','off','unknown','unmanaged'].includes(s.sub2api?.schedulable)?s.sub2api.schedulable:'unknown',
+upstream_ready:s.backend==='relay'?!!s.relay?.ready:!!s.keepalive?.ready}));process.exit(0);
+}catch{process.exit(1)}});
 });
 r.setTimeout(3000,()=>r.destroy());r.on('error',()=>process.exit(1));
 setTimeout(()=>process.exit(1),4000).unref();
@@ -186,14 +192,30 @@ class RemotePoller:
             stopped.wait(self.agent.cfg['remote_control'].get('interval_sec', 30))
 
 
+class DeploymentError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 def command(args, timeout=180):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        raise RuntimeError('Docker command unavailable or timed out') from None
+    except subprocess.TimeoutExpired:
+        raise DeploymentError('command_timeout') from None
+    except OSError:
+        raise DeploymentError('command_unavailable') from None
     if result.returncode:
         # Compose output can contain expanded environment variables and secrets.
-        raise RuntimeError('Docker operation failed; inspect the service locally')
+        detail = result.stderr.lower()
+        code = 'docker_operation_failed'
+        for marker, category in [('is not running', 'container_not_running'), ('no such image', 'image_missing'),
+                                 ('no such container', 'container_missing'), ('no space left', 'disk_full'),
+                                 ('permission denied', 'permission_denied'), ('cannot connect to the docker daemon', 'docker_unavailable')]:
+            if marker in detail:
+                code = category
+                break
+        raise DeploymentError(code)
     return result.stdout.strip()
 
 
@@ -243,7 +265,16 @@ class Agent:
     def status(self):
         with self.data_lock:
             return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error', 'remote_command',
-                                                'host_updated', 'host_restart', 'host_restored') if k in self.state}
+                                                'host_updated', 'host_restart', 'host_restored', 'failure', 'recovery_errors',
+                                                'target_health') if k in self.state}
+
+    @staticmethod
+    def failure_detail(step, exc, target=None):
+        # All fields are generated locally. Never return subprocess output or URLs.
+        detail = {'step': step, 'code': exc.code if isinstance(exc, DeploymentError) else 'operation_failed'}
+        if target is not None:
+            detail['target'] = target['name']
+        return detail
 
     # --- host tool self-update -------------------------------------------------------------
     def stage_host_files(self, image, job):
@@ -368,65 +399,86 @@ class Agent:
         end = time.monotonic() + self.cfg.get('health_timeout_sec', 180)
         while time.monotonic() < end:
             try:
-                self.compose(target, 'exec', '-T', 'bridge', 'node', '-e', READY_JS, timeout=10)
+                raw = self.compose(target, 'exec', '-T', 'bridge', 'node', '-e', READY_JS, timeout=10)
+                health = json.loads(raw)
+                if not isinstance(health, dict) or not re.fullmatch(r'\d+\.\d+\.\d+', str(health.get('version', ''))):
+                    raise ValueError('Invalid readiness response')
+                if self.state.get('phase') == 'activating' and health['version'] != self.state.get('version'):
+                    raise ValueError('Running version differs from target')
+                allowed = ('version', 'backend', 'managed', 'reachable', 'schedulable', 'upstream_ready')
+                self.save(target_health={**self.state.get('target_health', {}), target['name']: {k: health[k] for k in allowed if k in health}})
                 return
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 self.pause(3)
-        raise RuntimeError('Bridge registration/readiness did not recover in time')
+        raise DeploymentError('bridge_unresponsive')
 
     def rollback(self):
-        self.save(phase='rolling_back')
-        failed = False
+        self.save(phase='rolling_back', recovery_errors=[], target_health={})
+        failures = []
         restart = False
         try:
             restart = self.restore_host_files()
-        except Exception:
-            failed = True
+        except Exception as exc:
+            failures.append(self.failure_detail('restore_host', exc))
         for item in self.state['snapshots']:
+            step = 'restore_image'
             try:
                 self.run(['docker', 'tag', item['image'], LOCAL_IMAGE])
+                step = 'restore_container'
                 self.compose(item['target'], 'up', '-d', '--no-build', '--pull', 'never', '--force-recreate', 'bridge')
+                step = 'restore_health'
                 self.ready(item['target'])
-            except Exception:
-                failed = True  # Attempt all accounts even if one cannot recover.
+            except Exception as exc:
+                failures.append(self.failure_detail(step, exc, item['target']))
         try:
             self.run(['docker', 'tag', self.state['previous_tag'], LOCAL_IMAGE])
-        except Exception:
-            failed = True
-        self.save(phase='rollback_failed' if failed else 'rolled_back', host_restart=restart,
-                  error='Recovery incomplete; check containers locally' if failed else None)
+        except Exception as exc:
+            failures.append(self.failure_detail('restore_tag', exc))
+        self.save(phase='rollback_failed' if failures else 'rolled_back', host_restart=restart, recovery_errors=failures,
+                  error='Recovery incomplete; see recovery_errors' if failures else None)
         if restart:
             self.schedule_service_restart(self.state.get('job_id') or secrets.token_hex(6))
 
     def deploy(self):
         changed = False
+        step, target = 'fetch_manifest', None
         try:
             manifest = self.fetch(self.cfg['manifest_url'], self.cfg['image_repository'])
             manifest = validate_manifest(manifest, self.cfg['image_repository'])
             self.save(phase='pulling', version=manifest['version'])
+            step = 'pull_image'
             self.run(['docker', 'pull', manifest['image']], timeout=1200)
+            step = 'verify_image'
             version = self.run(['docker', 'run', '--rm', '--network', 'none', manifest['image'], '--version'])
             if version != manifest['version']:
                 raise ValueError('Image version differs from release manifest')
             self.run(['docker', 'run', '--rm', '--network', 'none', manifest['image'], 'selftest'])
             job = self.state.get('job_id') or secrets.token_hex(6)
+            step = 'stage_host'
             stage = self.stage_host_files(manifest['image'], job) if self.self_update else None
+            step = 'snapshot'
             snapshots, previous = self.snapshot()
             # Journal before the first mutation; a restarted agent can recover.
             self.save(phase='activating', snapshots=snapshots, previous_tag=previous, host_backup=None, host_changed=[],
-                      host_updated=False, host_restart=False, host_restored=None)
+                      host_updated=False, host_restart=False, host_restored=None, target_health={})
             changed = True
+            step = 'activate_image'
             self.run(['docker', 'tag', manifest['image'], LOCAL_IMAGE])
             for item in snapshots:
+                target, step = item['target'], 'stop_container'
                 self.compose(item['target'], 'stop', 'bridge', timeout=210)
+                step = 'start_container'
                 self.compose(item['target'], 'up', '-d', '--no-build', '--pull', 'never', '--force-recreate', 'bridge')
+                step = 'check_health'
                 self.ready(item['target'])
+            step, target = 'install_host', None
             host_updated = self.apply_host_files(stage)
             restart = host_updated and any(name in SERVICE_FILES for name in stage['changed'])
             self.save(phase='succeeded', error=None, host_updated=host_updated, host_restart=restart)
             if restart:
                 self.schedule_service_restart(job)
-        except Exception:
+        except Exception as exc:
+            self.save(failure=self.failure_detail(step, exc, target))
             if changed:
                 self.rollback()
             else:
@@ -448,7 +500,7 @@ class Agent:
                     return False
                 patch['remote_command'] = remote_command
             if not recover:
-                patch.update(phase='checking', job_id=secrets.token_hex(12), version=None, error=None)
+                patch.update(phase='checking', job_id=secrets.token_hex(12), version=None, error=None, failure=None, recovery_errors=[])
             elif remote_command is not None:
                 patch.update(phase='rolling_back', job_id=secrets.token_hex(12), error=None)
             if patch:

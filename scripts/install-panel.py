@@ -16,16 +16,25 @@ def origin(value):
     return value
 
 
+def prepare_recovery(agent):
+    if agent.state.get('phase') != 'rollback_failed' or not agent.state.get('snapshots') or not agent.state.get('previous_tag'):
+        raise ValueError('Repair requires a failed rollback with saved container snapshots')
+    # The administrator just installed newer recovery code. An old host backup must
+    # not overwrite it while container rollback retries. Keep all container snapshots.
+    agent.save(phase='rolling_back', host_backup=None, host_changed=[], host_restored=None, host_restart=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--origin', required=True)
+    parser.add_argument('--origin', help='Defaults to the existing panel HTTPS origin')
+    parser.add_argument('--repair-recovery', action='store_true', help='Install fixed host tools and retry an existing failed rollback')
     args = parser.parse_args()
-    url = origin(args.origin)
     if os.name != 'posix' or os.geteuid() != 0:
         raise ValueError('Run on the Linux host as root, not inside the bridge container')
     source = Path(__file__).resolve().parents[1]
     config_file = Path('/etc/mirasim-deploy/config.json')
     config = json.loads(config_file.read_text())
+    url = origin(args.origin or config.get('panel', {}).get('origin', ''))
     spec = importlib.util.spec_from_file_location('deploy_agent', source / 'scripts/deploy-agent.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -41,6 +50,7 @@ def main():
     module.command(['systemctl', 'stop', 'mirasim-deploy.service'], timeout=240)
     old = {name: (destination / name).read_bytes() if (destination / name).exists() else None for name in files}
     old_config = dict(config)
+    old_state = agent.state_file.read_bytes() if agent.state_file.exists() else None
     try:
         current = module.Agent(config)
         if current.state.get('phase') in ('activating', 'rolling_back'):
@@ -59,18 +69,32 @@ def main():
             tmp.write_bytes(data)
             os.replace(tmp, file)
         module.atomic_json(config_file, config)
+        if args.repair_recovery:
+            prepare_recovery(current)
         module.command(['systemctl', 'start', 'mirasim-deploy.service'])
         module.command(['systemctl', 'is-active', '--quiet', 'mirasim-deploy.service'])
     except Exception:
+        # A newly started service may already be writing the recovery journal.
+        # Stop that writer before restoring either code or state.
+        module.command(['systemctl', 'stop', 'mirasim-deploy.service'], timeout=240)
         for name, data in old.items():
             if data is not None:
                 (destination / name).write_bytes(data)
+            else:
+                try:
+                    (destination / name).unlink()
+                except FileNotFoundError:
+                    pass
         module.atomic_json(config_file, old_config)
+        if old_state is not None:
+            module.atomic_json(agent.state_file, json.loads(old_state))
         module.command(['systemctl', 'restart', 'mirasim-deploy.service'])
         raise
     print('Panel installed on 127.0.0.1:8790. Reverse proxy this address to ' + url)
     print('Read your separate admin key locally: sudo cat /etc/mirasim-deploy/panel.key')
     print('Open ' + url + '/panel. Upgrade bridge from the Versions page before using account management.')
+    if args.repair_recovery:
+        print('Container recovery requested; check the panel deployment progress before upgrading. Credentials and data volumes were preserved.')
 
 
 if __name__ == '__main__':

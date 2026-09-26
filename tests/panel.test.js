@@ -72,6 +72,34 @@ test('OTP concurrent submits and cancellation never create a second successful l
   const first = capture.submit('123456'); await assert.rejects(capture.submit('123456'), /正在校验/);
   capture.close(); release(); await assert.rejects(first, /已结束/); await assert.rejects(capture.result, /取消/); assert.equal(calls, 1);
 });
+
+for (const provider of ['google', 'github']) test(`panel ${provider} generates OAuth link, accepts callback and preserves main credentials`, async (t) => {
+  const { cfg, ctx, dir } = fixture(t);
+  const before = fs.readFileSync(cfg._config_path);
+  const upstream = http.createServer((req, res) => {
+    if (req.url === '/auth/oauth/providers') return res.end(JSON.stringify({ providers: ['google', 'github'] }));
+    if (req.url === '/auth/me') {
+      assert.equal(req.headers.authorization, 'Bearer new-' + provider);
+      return res.end('{}');
+    }
+    res.writeHead(404); res.end();
+  });
+  cfg.relay.auth_url = await listen(upstream); t.after(() => close(upstream));
+  const panel = createPanel(cfg, ctx); t.after(() => panel.close());
+  const login = await panel.call('login/start', { provider, profile: provider + '-account', hosted: true, group_id: 15 });
+  const url = new URL(login.url);
+  assert.equal(url.pathname, `/auth/oauth/${provider}/login`);
+  const callback = new URL(url.searchParams.get('redirect_uri'));
+  assert.equal(callback.searchParams.get('state'), url.searchParams.get('state'));
+  callback.searchParams.set('access_token', 'new-' + provider);
+  callback.searchParams.set('refresh_token', 'refresh-' + provider);
+  const saved = await panel.call('login/complete', { id: login.id, callback: callback.href });
+  assert.equal(saved.saved, true);
+  assert.deepEqual(fs.readFileSync(cfg._config_path), before);
+  assert.equal(fs.readFileSync(path.join(dir, 'setting.json'), 'utf8'), 'original-credential');
+  const credential = JSON.parse(fs.readFileSync(path.join(dir, 'profiles', provider + '-account', 'setting.json')));
+  assert.equal(credential.access_token, 'new-' + provider);
+});
 test('panel model policy persists before memory update and marks sub2 mapping for resync', async (t) => {
   const { cfg, ctx } = fixture(t); const panel = createPanel(cfg, ctx); t.after(() => panel.close());
   await panel.call('model', { id: 'gpt-test', enabled: false });

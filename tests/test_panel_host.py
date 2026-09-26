@@ -58,6 +58,43 @@ class PanelHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Release manifest unavailable'):
             console.call({'operation': 'release/check'})
 
+    def test_failed_recovery_keeps_diagnostics_readable_but_blocks_mutations(self):
+        self.agent.save(phase='rollback_failed')
+        calls = []
+        console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append(data) or {'ok': True})
+        for op in ['status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs']:
+            self.assertTrue(console.call({'operation': op})['ok'])
+        self.assertEqual(len(calls), 7)
+        for op in ['login/start', 'account/host', 'settings', 'start']:
+            with self.assertRaisesRegex(ValueError, 'Recover the failed rollback'):
+                console.call({'operation': op})
+
+    def test_deploy_audit_reports_acceptance_not_completion(self):
+        self.agent.start = lambda recover=False: True
+        console = p.Console(self.agent, m.atomic_json)
+        self.assertTrue(console.call({'operation': 'deploy'})['accepted'])
+        self.assertEqual(console.events[-1]['action'], 'deploy/requested')
+
+    def test_github_is_forwarded_without_replacing_the_provider(self):
+        calls = []
+        console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append(data) or {})
+        console.call({'operation': 'login/start', 'data': {'hosted': True, 'profile': 'github-account', 'provider': 'github'}})
+        self.assertEqual(calls[0]['data']['provider'], 'github')
+
+    def test_repair_preserves_container_snapshots_but_does_not_restore_stale_host_code(self):
+        spec = importlib.util.spec_from_file_location('install_panel', Path(__file__).parents[1] / 'scripts/install-panel.py')
+        installer = importlib.util.module_from_spec(spec); spec.loader.exec_module(installer)
+        snapshots, tag = self.agent.snapshot()
+        self.agent.save(phase='rollback_failed', snapshots=snapshots, previous_tag=tag, host_backup='old-host', host_changed=['deploy-agent.py'])
+        installer.prepare_recovery(self.agent)
+        self.assertEqual(self.agent.state['phase'], 'rolling_back')
+        self.assertEqual(self.agent.state['snapshots'], snapshots)
+        self.assertEqual(self.agent.state['previous_tag'], tag)
+        self.assertIsNone(self.agent.state['host_backup'])
+        self.assertEqual(self.agent.state['host_changed'], [])
+        with self.assertRaisesRegex(ValueError, 'Repair requires'):
+            installer.prepare_recovery(self.agent)
+
     def test_bridge_input_uses_stdin_and_only_selected_target(self):
         calls = []
         console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append((argv, data)) or {})

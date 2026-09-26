@@ -1,8 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.2**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.3**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
 
-**0.8.2**：修复新增 Google/GitHub 账号时邮箱被浏览器填入 profile 的问题，自动生成合法 profile；模型目录解析和额度快照进一步兼容上游格式。
+**0.8.3**：修复回退锁定后的诊断、部署就绪条件、GitHub 登录接入和 ZIP 图标损坏。已遇到“回退未完成”的旧后台，请按 [恢复步骤](RECOVERY.md) 操作；正常后台可直接网页升级。
 
 **0.8.0**：多个 Mira 账号共用一个 bridge 地址，网页登录后自动托管并注册到 sub2；网页升级同时更新宿主机后台，不再需要进服务器终端（从 0.7.x 升级需最后一次运行安装器，见 [UPGRADE-0.8.0.md](UPGRADE-0.8.0.md)）；网页新增全部账号一览、按账号暂停/恢复调度。
 

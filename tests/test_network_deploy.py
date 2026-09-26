@@ -5,10 +5,13 @@ import tempfile
 import threading
 import unittest
 import time
+import os
+import shutil
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 spec = importlib.util.spec_from_file_location('deploy_agent', Path(__file__).parents[1] / 'scripts/deploy-agent.py')
 m = importlib.util.module_from_spec(spec)
@@ -61,6 +64,9 @@ class DeploymentTests(unittest.TestCase):
         if args[:2] == ['docker', 'inspect']:
             return json.dumps({'State': {'Running': True}, 'Image': OLD})
         if args[:2] == ['docker', 'compose']:
+            if args[-1] == m.READY_JS:
+                return json.dumps({'version': self.version, 'backend': 'relay', 'managed': True,
+                                   'reachable': True, 'schedulable': 'on', 'upstream_ready': True})
             profile = any('compose.profile.yaml' in s for s in args)
             if args[-3:] == ['config', '--format', 'json']:
                 return json.dumps({'name': 'second' if profile else 'main', 'services': {'bridge': {'image': m.LOCAL_IMAGE}}})
@@ -362,6 +368,67 @@ class HostSelfUpdateTests(DeploymentTests):
         self.assertEqual(agent.status()['phase'], 'succeeded')
         self.assertFalse(any(c[:2] in (['docker', 'create'], ['docker', 'cp']) for c in self.calls))
         self.assertEqual((self.host / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
+
+    def test_recovery_reports_fixed_failure_codes_and_preserves_initial_failure(self):
+        agent = self.agent()
+        def readiness(target):
+            raise m.DeploymentError('bridge_unresponsive')
+        agent.ready = readiness
+        agent.deploy()
+        status = agent.status()
+        self.assertEqual(status['failure'], {'step': 'check_health', 'code': 'bridge_unresponsive', 'target': 'main'})
+        self.assertEqual(status['recovery_errors'], [{'step': 'restore_health', 'code': 'bridge_unresponsive', 'target': 'main'}])
+        self.assertEqual(status['phase'], 'rollback_failed')
+
+    def test_paused_or_upstream_unavailable_is_not_a_failed_code_deployment(self):
+        agent = self.agent()
+        run = agent.run
+        def paused(args, **kw):
+            if args[-1] == m.READY_JS:
+                return json.dumps({'version': '0.6.0', 'backend': 'relay', 'managed': True, 'reachable': False,
+                                   'schedulable': 'off', 'upstream_ready': False})
+            return run(args, **kw)
+        agent.run = paused
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'succeeded')
+        self.assertEqual(agent.status()['target_health']['main']['schedulable'], 'off')
+
+
+@unittest.skipUnless(shutil.which('node'), 'Node needed to execute the real readiness probe')
+class ReadinessProbeTests(unittest.TestCase):
+    def test_real_probe_accepts_local_status_without_requiring_upstream_and_rejects_invalid_response(self):
+        payload = {'version': '0.8.3', 'backend': 'relay', 'relay': {'ready': False},
+                   'sub2api': {'managed': False, 'reachable': False, 'schedulable': 'off'}}
+        response_code = 200
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(response_code)
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                file = Path(directory) / 'config.json'
+                file.write_text(json.dumps({'listen': {'host': '127.0.0.1', 'port': server.server_port}, 'bridge_secret': 'hidden-secret'}))
+                env = {**os.environ, 'MIRASIM_CONFIG': str(file), 'MIRASIM_LISTEN_HOST': '127.0.0.1', 'MIRASIM_LISTEN_PORT': str(server.server_port)}
+                def probe():
+                    return subprocess.run(['node', '-e', m.READY_JS], env=env, capture_output=True, text=True, timeout=8)
+                result = probe()
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse(json.loads(result.stdout)['upstream_ready'])
+                self.assertNotIn('hidden-secret', result.stdout)
+                payload.update(backend='session', keepalive={'ready': True})
+                self.assertEqual(probe().returncode, 0, 'session backend does not have relay.ready')
+                response_code = 503
+                self.assertNotEqual(probe().returncode, 0)
+                response_code = 200
+                payload.clear()
+                self.assertNotEqual(probe().returncode, 0, 'empty success object is not a working bridge')
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
 
 
 if __name__ == '__main__':

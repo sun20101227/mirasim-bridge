@@ -45,7 +45,10 @@ jobs:
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - name: Package source without credentials
         shell: pwsh
-        run: ./package.ps1
+        run: |
+          ./package.ps1
+          python3 scripts/verify-package.py "dist/mirasim-bridge-$env:VERSION-source.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive verification failed' }
       - name: Verify published Linux image
         env:
           DIGEST: ${{ steps.image.outputs.digest }}

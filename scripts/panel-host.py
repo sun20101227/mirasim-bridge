@@ -168,14 +168,16 @@ class Console:
                 raise ValueError('Release manifest unavailable') from None
         if op in ('deploy', 'rollback'):
             accepted = self.agent.start(recover=op == 'rollback')
-            self.audit(op, 'all', accepted)
+            # Acceptance is not completion; the durable deployment journal owns the result.
+            self.audit(op + '/requested', 'all', accepted)
             return {'accepted': accepted, **self.agent.status()}
         if op not in OPERATIONS | {'start', 'stop', 'attach'}:
             raise ValueError('Unknown operation')
         if not self.agent.lock.acquire(blocking=False):
             raise ValueError('Another management operation is in progress')
         try:
-            if self.agent.state.get('phase') == 'rollback_failed':
+            readonly = op in {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status'} or (op == 'codex' and data.get('enabled') is None)
+            if self.agent.state.get('phase') == 'rollback_failed' and not readonly:
                 raise ValueError('Recover the failed rollback first')
             if op == 'attach':
                 result = self.attach(data.get('profile'))

@@ -138,6 +138,7 @@ function renderLatency(latency) {
 }
 
 async function overview() {
+  bridgeVersion = null; $('current-version').textContent = '—';
   const s = await api('summary', scoped()), runtime = await api('status', scoped());
   const sub = runtime.sub2api || {};
   bridgeVersion = runtime.version || null;
@@ -313,7 +314,9 @@ async function logs() {
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
-const phases = { idle: ['等待操作', ''], checking: ['检查发布', 'info'], pulling: ['拉取并验证镜像', 'info'], activating: ['重建容器并验证调度', 'info'], succeeded: ['升级成功', 'ok'], failed: ['准备失败，运行中的容器未改变', 'bad'], rolling_back: ['正在回退', 'warn'], rolled_back: ['已回退', 'warn'], rollback_failed: ['回退未完成，需要排查', 'bad'] };
+const phases = { idle: ['等待操作', ''], checking: ['检查发布', 'info'], pulling: ['拉取并验证镜像', 'info'], activating: ['重建容器并验证服务', 'info'], succeeded: ['升级成功', 'ok'], failed: ['准备失败，运行中的容器未改变', 'bad'], rolling_back: ['正在回退', 'warn'], rolled_back: ['已回退', 'warn'], rollback_failed: ['回退未完成，需要排查', 'bad'] };
+const steps = { fetch_manifest: '获取发布清单', pull_image: '拉取镜像', verify_image: '验证镜像', stage_host: '准备宿主机文件', snapshot: '记录原容器', activate_image: '切换镜像', stop_container: '停止旧容器', start_container: '启动新容器', check_health: '检查服务', install_host: '更新后台', restore_host: '恢复后台', restore_image: '恢复镜像', restore_container: '恢复容器', restore_health: '检查恢复后的服务', restore_tag: '恢复镜像标签' };
+const errors = { command_timeout: '命令超时', command_unavailable: '命令不可执行', docker_operation_failed: 'Docker 操作失败', container_not_running: '容器未运行', container_missing: '容器不存在', image_missing: '镜像不存在', disk_full: '磁盘空间不足', permission_denied: '权限不足', docker_unavailable: 'Docker 服务不可用', bridge_unresponsive: '桥接器未正常响应', operation_failed: '操作失败' };
 async function deployment() {
   if (!host) return;
   const s = await api('deployment'), [text, tone] = phases[s.phase] || [s.phase, ''];
@@ -324,22 +327,34 @@ async function deployment() {
   if (s.phase === 'succeeded' && s.host_updated) box.append(node('span', s.host_restart ? '宿主机后台已一并更新并重启，请刷新页面后重新登录。' : '网页文件已一并更新，刷新页面即可看到新版。'));
   if (s.host_restored) box.append(node('span', '宿主机后台已回退到上一版本。'));
   if (s.error) box.append(node('span', s.error));
+  for (const failure of [s.failure, ...(s.recovery_errors || [])].filter(Boolean)) box.append(node('span', `${failure.target || '后台'} · ${steps[failure.step] || failure.step}：${errors[failure.code] || failure.code}`));
+  for (const [name, health] of Object.entries(s.target_health || {})) {
+    if (!health.upstream_ready || (health.managed && (!health.reachable || health.schedulable !== 'on'))) box.append(node('span', `${name}：桥接器 ${health.version} 已响应，调度/上游尚未就绪或已手动暂停。请在概览确认。`));
+  }
   const events = (await api('events')).slice().reverse();
   $('events').replaceChildren(...(events.length ? events.map((e) => {
     const row = node('div', '', 'event'), when = node('time', relative(e.at * 1000)); when.title = new Date(e.at * 1000).toLocaleString();
-    const what = node('div'); what.append(node('b', ACTIONS[e.action] || e.action), document.createTextNode(' · ' + e.target));
-    row.append(when, what, e.ok ? pill('完成', 'ok') : pill('失败', 'bad')); return row;
+    const requested = e.action.endsWith('/requested') || ['deploy', 'rollback'].includes(e.action);
+    const action = e.action.replace(/\/requested$/, '');
+    const what = node('div'); what.append(node('b', ACTIONS[action] || action), document.createTextNode(' · ' + e.target));
+    row.append(when, what, e.ok ? pill(requested ? '已接受任务' : '完成', requested ? 'info' : 'ok') : pill(requested ? '未接受任务' : '失败', 'bad')); return row;
   }) : [empty('还没有管理操作记录')]));
 }
 async function checkRelease() {
   const r = await api('release/check'); $('latest-version').textContent = r.latest;
+  if (!bridgeVersion) {
+    $('update-pill').hidden = false; $('update-pill').className = 'pill warn';
+    $('update-pill').textContent = '运行版本未知，请检查桥接器状态'; return;
+  }
   const newer = bridgeVersion && versionNewer(r.latest, bridgeVersion);
   $('update-pill').hidden = false;
   $('update-pill').className = 'pill ' + (newer ? 'info' : 'ok');
   $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : '已是最新版本';
 }
 async function refresh() {
-  groupsCache = null; await fleet(); await overview(); await profiles(); await deployment();
+  groupsCache = null;
+  // Keep recovery controls available when account reads fail.
+  try { await fleet(); await overview(); await profiles(); } finally { await deployment(); }
   if (view === 'models') await models(); if (view === 'logs') await logs();
 }
 async function showView(next) {
@@ -356,9 +371,9 @@ $('login-form').addEventListener('submit', guarded(async () => {
   key = $('key').value.trim(); if (!/^[a-f0-9]{64}$/.test(key)) throw Error('请输入有效的 64 位管理密钥');
   if (host) await api('targets'); else await api('summary');
   $('key').value = ''; $('login-box').hidden = true; $('workspace').hidden = false; notice('已连接后台');
-  await refresh();
+  try { await refresh(); } catch (err) { notice(err.message, true); }
   clearInterval(timer);
-  timer = setInterval(async () => { if (!key || polling || document.hidden) return; polling = true; try { await fleet(); await overview(); await deployment(); if (view === 'logs') await logs(); } catch {} finally { polling = false; } }, 15000);
+  timer = setInterval(async () => { if (!key || polling || document.hidden) return; polling = true; try { try { await fleet(); await overview(); } finally { await deployment(); } if (view === 'logs') await logs(); } catch {} finally { polling = false; } }, 15000);
 }));
 $('logout').addEventListener('click', () => { key = ''; clearInterval(timer); location.reload(); });
 $('refresh').addEventListener('click', guarded(refresh)); $('load-models').addEventListener('click', guarded(models)); $('load-logs').addEventListener('click', guarded(logs));
@@ -399,7 +414,7 @@ function providerChanged() {
   const email = $('provider').value === 'email', hosted = $('hosted').checked;
   $('email-field').hidden = !email; $('email').required = email;
   $('port-field').hidden = hosted || !host; $('base-field').hidden = hosted || host;
-  $('begin-login').textContent = email ? '发送验证码' : '生成 Google 授权链接';
+  $('begin-login').textContent = email ? '发送验证码' : `生成 ${$('provider').value === 'github' ? 'GitHub' : 'Google'} 授权链接`;
 }
 $('provider').addEventListener('change', providerChanged); $('hosted').addEventListener('change', providerChanged); providerChanged();
 $('email').addEventListener('blur', () => {
@@ -418,6 +433,8 @@ $('account-form').addEventListener('submit', guarded(async () => {
   const hosted = $('hosted').checked;
   let profile = $('profile').value.trim().toLowerCase();
   const email = $('email').value.trim();
+  if (!profile) profile = 'mira-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  if (profile.includes('@')) profile = ('mira-' + profile.replace(/[^a-z0-9_-]+/g, '-')).slice(0, 40);
   if (!/^[a-z][a-z0-9_-]{0,39}$/.test(profile)) {
     if (profile.includes('@')) { $('email').value = email || profile; $('email').dispatchEvent(new Event('blur')); profile = $('profile').value.trim(); }
     if (!/^[a-z][a-z0-9_-]{0,39}$/.test(profile)) throw Error('Profile 只能以小写字母开头，并包含小写字母、数字、下划线或短横线，例如 mira-second');
@@ -429,9 +446,10 @@ $('account-form').addEventListener('submit', guarded(async () => {
   if (!groupId) throw Error('请选择分组，或填写分组 ID');
   data.group_id = groupId;
   const r = await api('login/start', data, 'main'); loginSession = { ...r, profile: data.profile, hosted }; $('complete-box').hidden = false;
-  $('oauth-link').hidden = data.provider !== 'google';
+  $('oauth-link').hidden = !['google', 'github'].includes(data.provider);
+  $('oauth-link').textContent = `打开 ${data.provider === 'github' ? 'GitHub' : 'Google'} 授权页面 ↗`;
   if (r.url) { const u = new URL(r.url); if (u.protocol !== 'https:') throw Error('授权地址不是 HTTPS'); $('oauth-link').href = r.url; }
-  $('login-hint').textContent = data.provider === 'email' ? '验证码已发送。输错可重试，最多 5 次；不要重复发送。' : '在无痕窗口打开授权链接，完成后复制最终回调地址到下面。';
+  $('login-hint').textContent = data.provider === 'email' ? '验证码已发送。输错可重试，最多 5 次；不要重复发送。' : '在无痕窗口打开授权链接。授权后会跳到 127.0.0.1，显示无法访问属于正常情况；复制地址栏完整回调 URL 到下面，不要发送给他人。';
   $('code').type = 'password'; $('code').value = ''; $('code').placeholder = data.provider === 'email' ? '邮箱验证码' : '完整回调 URL'; $('login-message').textContent = '';
 }));
 $('complete-form').addEventListener('submit', guarded(async () => {
