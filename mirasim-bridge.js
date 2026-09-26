@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -95,8 +95,10 @@ const DEFAULT_CONFIG = {
     //（自愈重试兜住才开始怀疑，日志确认）。默认空串 = 全部剥离，交给上游去演化。
     sampling_models: '',
     model_filter: '',           // 空 = 上游目录里的模型全部放行（除 model_block/disabled_models）；新系列自动出现，无需改配置
-    model_block: 'fable',       // 黑名单正则：不发往上游、不出现在 /v1/models。空串放行全部
+    model_block: '',            // 默认不隐藏上游目录；需要限制时显式配置正则
     default_max_tokens: 8192,   // max_tokens 缺失 / 0 / 负数时回落到这个值
+    // 这是本地调度策略，不是上游目录。空数组意味着上游目录中的模型全部可见；
+    // 上游暂时无容量的型号仍会在页面标为“已发现”，可单独停用而不丢失目录信息。
     disabled_models: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'],
     kimi_default_effort: 'low',
     // relay 只对 Claude 模型强制要求 Claude Code 身份提示词（2026-09-26 实测：Kimi 不带也 200，
@@ -799,32 +801,16 @@ function findAgentProcesses({ withSecret = false } = {}) {
 function classifyResponse(status, headers, body, ms, port) {
   const base = { port, status, ms };
   if (status === 401 || status === 403) return { ...base, class: 'auth', models: [] };
-
-  if (status === 200) {
-    const ctype = String(headers['content-type'] || '').toLowerCase();
-    const trimmed = body.trimStart();
-    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      try {
-        const obj = JSON.parse(body);
-        const list = Array.isArray(obj) ? obj
-          : Array.isArray(obj.data) ? obj.data
-            : Array.isArray(obj.models) ? obj.models : null;
-        if (list) {
-          const models = list
-            .map((m) => (typeof m === 'string' ? m : m && (m.id || m.name)))
-            .filter(Boolean);
-          // 模型列表可以是空数组——仍然是 proxy 形态，只是还没拉到模型
-          return { ...base, class: 'proxy', models };
-        }
-      } catch { /* 落到 other */ }
-      return { ...base, class: 'other', models: [] };
-    }
-    if (ctype.includes('text/html') || trimmed.startsWith('<')) {
-      return { ...base, class: 'webui', models: [] };
-    }
-    return { ...base, class: 'other', models: [] };
+  if (status !== 200) return { ...base, class: 'other', models: [] };
+  const ctype = String(headers['content-type'] || '').toLowerCase();
+  const trimmed = String(body || '').trimStart();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const models = catalogRows(JSON.parse(body)).map((m) => typeof m === 'string' ? m : m.id);
+      return { ...base, class: 'proxy', models };
+    } catch { /* fall through to webui/other */ }
   }
-
+  if (ctype.includes('text/html') || trimmed.startsWith('<')) return { ...base, class: 'webui', models: [] };
   return { ...base, class: 'other', models: [] };
 }
 
@@ -1094,9 +1080,47 @@ function isModelAllowed(id, cfg) {
 }
 
 function catalogRows(value) {
-  const rows = Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : value?.models;
-  if (!Array.isArray(rows) || rows.some((m) => typeof m !== 'string' && (!isPlainObject(m) || typeof m.id !== 'string'))) throw new Error('Invalid upstream model catalog');
-  return rows;
+  // Mirasim has returned data[], models[], items[] and, in older relay builds,
+  // a nested result object. Accept all documented shapes but keep each entry's
+  // original object so metadata such as owned_by/max_input_tokens survives.
+  const containers = [value, value?.result].filter(isPlainObject);
+  let rows = Array.isArray(value) ? value : null;
+  for (const container of containers) {
+    if (rows) break;
+    for (const key of ['data', 'models', 'items']) {
+      if (Array.isArray(container[key])) { rows = container[key]; break; }
+      if (isPlainObject(container[key])) {
+        rows = Object.entries(container[key]).map(([id, entry]) =>
+          isPlainObject(entry) ? { ...entry, id: entry.id || id } : { id, value: entry });
+        break;
+      }
+    }
+  }
+  if (!Array.isArray(rows)) throw new Error('Invalid upstream model catalog');
+  const out = [];
+  const seen = new Set();
+  for (const model of rows) {
+    const id = typeof model === 'string'
+      ? model.trim()
+      : isPlainObject(model) && typeof (model.id || model.model_id || model.name || model.model) === 'string'
+        ? String(model.id || model.model_id || model.name || model.model).trim() : '';
+    if (!id || id.length > 256 || seen.has(id)) continue;
+    seen.add(id);
+    out.push(typeof model === 'string' ? id : (model.id ? model : { ...model, id }));
+  }
+  return out;
+}
+
+function replaceCatalogRows(value, rows) {
+  if (Array.isArray(value)) return rows;
+  const target = value?.result && isPlainObject(value.result) ? value.result : value;
+  if (!isPlainObject(target)) return rows;
+  const out = { ...value };
+  const key = Array.isArray(target.data) ? 'data' : Array.isArray(target.models) ? 'models'
+    : Array.isArray(target.items) ? 'items' : 'data';
+  if (target === value) out[key] = rows;
+  else out.result = { ...target, [key]: rows };
+  return out;
 }
 
 function sanitizeMessagesRequest(body, cfg) {
@@ -2403,15 +2427,15 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     try {
       const j = JSON.parse(text);
       const list = catalogRows(j);
-        const kept = list.filter((m) => {
-          const id = typeof m === 'string' ? m : m?.id;
-          return isModelAllowed(id, cfg);
-        });
-        ctx.counters.models_filtered += list.length - kept.length;
-        const catalog = Array.isArray(j) ? kept : { ...j, data: kept };
-        if (!Array.isArray(catalog)) delete catalog.models;
-        const out = Buffer.from(JSON.stringify(catalog), 'utf8');
-        if (target.relay) target.relay.ready = kept.length > 0;
+      const kept = list.filter((m) => isModelAllowed(typeof m === 'string' ? m : m?.id, cfg));
+      const filtered = kept.length !== list.length;
+      ctx.counters.models_filtered += list.length - kept.length;
+      // With the default policy the catalog is forwarded byte-for-byte. This
+      // keeps model metadata, ordering and number formatting identical to the
+      // Mirasim response. JSON is rebuilt only when an explicit local policy
+      // actually removes an entry.
+      const out = filtered ? Buffer.from(JSON.stringify(replaceCatalogRows(j, kept)), 'utf8') : Buffer.from(text, 'utf8');
+      if (target.relay) target.relay.ready = kept.length > 0;
         countOk();
         res.writeHead(200, mergedHeaders(upRes.headers, {
           'content-type': 'application/json; charset=utf-8', 'content-length': out.length,
@@ -2443,10 +2467,8 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     delete eventHeaders['content-length']; // Terminal events can finish before the upstream body/EOF.
     const kind = wirePath === '/v1/messages' ? 'messages' : 'responses';
     const requestId = crypto.randomBytes(8).toString('hex');
-    eventHeaders['x-bridge-request-id'] = requestId;
     eventHeaders['x-accel-buffering'] = 'no';
     eventHeaders['cache-control'] = 'no-cache, no-transform';
-    res.setHeader('x-bridge-request-id', requestId);
     const record = (code) => {
       ctx.lastStreamError = { code, request_id: requestId, model: String(cleanBody?.model || '').slice(0, 160), protocol: kind, at: new Date().toISOString() };
       warn('stream_failure ' + JSON.stringify(ctx.lastStreamError));
@@ -2875,6 +2897,8 @@ function cmdSelftest() {
 
   // --- 请求体约束清洗（§1.2，规则来自 mira-bridge 的实测探针矩阵）---
   const tcfg = deepMerge({}, DEFAULT_CONFIG);
+  // Self-test an explicit policy; production defaults expose the full catalog.
+  tcfg.constraints.model_block = 'fable';
   const san = (o) => sanitizeMessagesRequest(o, tcfg);
   // 显式放开采样参数白名单的配置，用来测「接受采样的模型」分支（默认已全部剥离）
   const tcfgHaiku = deepMerge({}, DEFAULT_CONFIG);
@@ -3953,5 +3977,5 @@ if (require.main === module) main().catch((err) => fatal(err && err.stack ? err.
 module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridgeBaseUrl, AccountHub, newAccountCtx, accountSummary, loadHostedAccount, configRoot, registerHubAccount, accountHealthTick, managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
-  modelFamily, isModelAllowed, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
+   modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
   getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, sanitizeMessagesRequest };

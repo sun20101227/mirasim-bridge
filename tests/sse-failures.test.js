@@ -52,8 +52,8 @@ test('SSE failures are explicit, never fake a successful finish or replay infere
         mode = scenario; const before = calls, result = await call();
         assert.equal(result.status, 503); assert.match(result.body, new RegExp('upstream_stream_' + code));
         assert.ok(!result.body.includes('secret upstream body'));
-        assert.match(result.headers.get('x-bridge-request-id'), /^[a-f0-9]{16}$/);
-        assert.equal(ctx.lastStreamError.request_id, result.headers.get('x-bridge-request-id'));
+        assert.equal(result.headers.get('x-bridge-request-id'), null, 'do not expose an implementation-specific bridge header');
+        assert.match(ctx.lastStreamError.request_id, /^[a-f0-9]{16}$/);
         assert.equal(calls, before + 1); assert.equal(ctx.inflight, 0);
       });
     }

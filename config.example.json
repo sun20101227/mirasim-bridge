@@ -56,7 +56,7 @@
   "constraints": {
     "sampling_models": "",
     "model_filter": "^(claude-|gpt-|deepseek-|kimi-)",
-    "model_block": "fable",
+    "model_block": "",
     "default_max_tokens": 8192,
     "disabled_models": [
       "deepseek-flash",

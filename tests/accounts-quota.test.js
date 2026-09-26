@@ -151,6 +151,19 @@ test('quota percentages are provider units, scoped exhaustion does not imply glo
   assert.throws(() => summarizeLimits({}), /Invalid/);
 });
 
+test('quota parser accepts percentage-only windows and preserves plan/status metadata', () => {
+  const snapshot = summarizeLimits({ paid: true, windows: [
+    { name: '5h', used_percent: 66.3, reset_at: '2026-09-26T13:00:00Z', status: 'warning' },
+    { name: '7d', status: 'allowed' },
+  ] }, Date.parse('2026-09-26T12:00:00Z'));
+  assert.equal(snapshot.paid, true);
+  assert.equal(snapshot.windows[0].remaining_percent, 33.7);
+  assert.equal(snapshot.windows[0].status, 'warning');
+  assert.equal(snapshot.windows[1].remaining_percent, null);
+  assert.match(quotaNote(snapshot), /paid/);
+  assert.match(quotaNote(snapshot), /剩余 33.7%/);
+});
+
 test('quota sync only updates owned notes, throttles, preserves user text, never touches local billing limits', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-quota-test-'));
   const file = path.join(dir, 'setting.json');

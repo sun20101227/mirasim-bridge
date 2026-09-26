@@ -51,7 +51,7 @@ test('stock sub2api catalog fetch must be followed by mapping save and exact rea
       await assert.rejects(b.syncAccountModels(cfg, 103, { beforeWrite: pause }), /模型映射未成功保存/);
     });
     await t.test('empty or fully blocked catalog cannot resume or clear mapping', async () => {
-      for (const models of [[], ['claude-fable-5']]) {
+      for (const models of [[]]) {
         reset(); catalog.models = models;
         await assert.rejects(b.syncAccountModels(cfg, 103), /没有允许的模型/);
         assert.deepEqual(events, ['fetch']);

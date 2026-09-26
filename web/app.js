@@ -402,10 +402,28 @@ function providerChanged() {
   $('begin-login').textContent = email ? '发送验证码' : '生成 Google 授权链接';
 }
 $('provider').addEventListener('change', providerChanged); $('hosted').addEventListener('change', providerChanged); providerChanged();
+$('email').addEventListener('blur', () => {
+  const field = $('profile');
+  if (field.value.trim() && /^[a-z][a-z0-9_-]{0,39}$/.test(field.value.trim())) return;
+  const email = $('email').value.trim().toLowerCase();
+  if (!email) return;
+  const local = email.split('@')[0].replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  const domain = (email.split('@')[1] || '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  let generated = `mira-${local || 'account'}${domain ? '-' + domain : ''}`.replace(/[^a-z0-9_-]/g, '-').slice(0, 40);
+  if (!/^[a-z]/.test(generated)) generated = 'mira-' + generated;
+  field.value = generated.slice(0, 40);
+});
 $('account-form').addEventListener('submit', guarded(async () => {
   if (loginSession) throw Error('请先完成当前登录，或等待过期后刷新页面');
   const hosted = $('hosted').checked;
-  const data = { profile: $('profile').value, account_name: $('account-name').value, provider: $('provider').value, email: $('email').value.trim(), hosted };
+  let profile = $('profile').value.trim().toLowerCase();
+  const email = $('email').value.trim();
+  if (!/^[a-z][a-z0-9_-]{0,39}$/.test(profile)) {
+    if (profile.includes('@')) { $('email').value = email || profile; $('email').dispatchEvent(new Event('blur')); profile = $('profile').value.trim(); }
+    if (!/^[a-z][a-z0-9_-]{0,39}$/.test(profile)) throw Error('Profile 只能以小写字母开头，并包含小写字母、数字、下划线或短横线，例如 mira-second');
+  }
+  $('profile').value = profile;
+  const data = { profile, account_name: $('account-name').value.trim(), provider: $('provider').value, email, hosted };
   if (!hosted) { data.port = Number($('port').value) || undefined; data.public_base_url = $('base-url').value; }
   const groupId = Number($('group-select').value) || Number($('group-id').value);
   if (!groupId) throw Error('请选择分组，或填写分组 ID');

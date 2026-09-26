@@ -22,8 +22,15 @@ def command_input(args, data, timeout=55):
             raise ValueError()
         result = json.loads(p.stdout)
         if result.get('status') != 200:
+            error = result.get('data', {}).get('error') if isinstance(result.get('data'), dict) else None
+            if isinstance(error, str) and 0 < len(error) <= 240:
+                raise ValueError(error)
             raise ValueError()
         return result['data']
+    except ValueError as err:
+        if str(err):
+            raise
+        raise ValueError('Bridge request failed; check login code, account status or upgrade the bridge') from None
     except Exception:
         raise ValueError('Bridge request failed; check login code, account status or upgrade the bridge') from None
 
@@ -257,6 +264,14 @@ def handler(agent, token, fallback, persist):
                 if not isinstance(data, dict) or set(data) - {'operation', 'target', 'data'}:
                     raise ValueError('Invalid request fields')
                 self.panel_reply(200, console.call(data))
-            except Exception:
-                self.panel_reply(400, {'error': '操作未完成：检查验证码/参数、账号是否运行，或稍后重试。升级时请等待完成。'})
+            except Exception as err:
+                # Bridge operations return deliberately short public errors. Do
+                # not hide useful validation feedback (for example an invalid
+                # profile name), but never reflect paths, tokens or subprocess
+                # output from the host into the browser.
+                message = str(err).strip()
+                blocked = ('token', 'secret', 'authorization', '/data', '\\', '/etc/', 'setting.json')
+                if not message or len(message) > 240 or any(part in message.lower() for part in blocked):
+                    message = '操作未完成：检查验证码/参数、账号是否运行，或稍后重试。升级时请等待完成。'
+                self.panel_reply(400, {'error': message})
     return Handler

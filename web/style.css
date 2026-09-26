@@ -97,6 +97,7 @@ p{color:var(--muted);margin:4px 0 16px}
 .quota-window[data-level="warn"] .meter i{background:var(--warn)}.quota-window[data-level="bad"] .meter i{background:var(--bad)}
 .quota-window[data-level="warn"] strong{color:var(--warn)}.quota-window[data-level="bad"] strong{color:var(--bad)}
 .quota-window .hint{margin:10px 0 0}
+.field-hint{display:block;margin-top:6px;color:var(--muted);font-size:12px;line-height:1.45}
 .empty{padding:18px;border:1px dashed var(--line-strong);border-radius:10px;color:var(--muted);font-size:13px;margin:0;text-align:center}
 dl{display:grid;grid-template-columns:150px minmax(0,1fr);margin:12px 0 0;gap:0;font-size:13px}
 dt,dd{padding:10px 0;border-bottom:1px solid var(--line)}

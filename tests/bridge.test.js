@@ -100,7 +100,7 @@ test('HTTP forwarding and cancellation', { timeout: 15000 }, async (t) => {
     });
     await t.test('models filter, real prefix and credential replacement', async () => {
       const r = await call('/v1/models', null, { authorization: 'Bearer test-secret', connection: 'x-remove', 'x-remove': 'bad' });
-      assert.deepEqual(JSON.parse(r.body).data, [{ id: 'claude-test' }, { id: 'gpt-test' }, { id: 'deepseek-v4-flash' }, { id: 'kimi-k3' }]);
+      assert.deepEqual(JSON.parse(r.body).data, [{ id: 'claude-test' }, { id: 'gpt-test' }, { id: 'deepseek-v4-flash' }, { id: 'kimi-k3' }, { id: 'claude-fable' }]);
       assert.equal(seen.url, '/private-prefix/v1/models');
       assert.equal(seen.headers.authorization, 'Bearer upstream-secret');
       assert.equal(seen.headers['x-api-key'], undefined);
@@ -210,7 +210,7 @@ test('model diagnostics require a completed response with visible text', () => {
   assert.equal(summary(JSON.stringify({ type: 'message', content: [{ type: 'text', text: 'OK' }], stop_reason: 'end_turn' })).ok, true);
   const cfg = config();
   for (const model of ['claude-test', 'gpt-test', 'deepseek-test', 'kimi-k3']) assert.equal(b.isModelAllowed(model, cfg), true);
-  assert.equal(b.isModelAllowed('deepseek-flash', cfg), false);
+   assert.equal(b.isModelAllowed('deepseek-flash', cfg), false);
   cfg.constraints.model_filter = '^claude-';
   assert.equal(b.isModelAllowed('gpt-test', cfg), false); // Preserve explicit existing overrides.
 });

@@ -147,14 +147,14 @@ test('catalog variants filter consistently and malformed catalogs fail closed', 
     if (req.url === '/v1/device/session') return mint(res);
     res.end(JSON.stringify(body));
   });
-  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG); cfg.backend = 'relay'; cfg.relay = { ...cfg.relay, ...f.options };
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG); cfg.backend = 'relay'; cfg.constraints.model_block = 'fable'; cfg.relay = { ...cfg.relay, ...f.options };
   const ctx = { inflight: 0, backoffUntil: 0, startedAt: Date.now(), counters: { total: 0, ok: 0, err: 0, rejected: 0, models_filtered: 0 } };
   const server = bridge.createBridgeServer(cfg, ctx, 'test', 2);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => new Promise((r) => { server.close(r); server.closeAllConnections(); }));
   const target = { host: '127.0.0.1', port: server.address().port, prefix: '', headers: { 'x-api-key': 'test' } };
   const result = await bridge.diagnosticRequest(target, '/v1/models');
-  assert.equal(result.status, 200); assert.deepEqual(JSON.parse(result.raw), { data: [{ id: 'gpt-test' }] });
+  assert.equal(result.status, 200); assert.deepEqual(JSON.parse(result.raw), { models: [{ id: 'gpt-test' }] });
   body = { models: 'not-an-array' };
   assert.equal((await bridge.diagnosticRequest(target, '/v1/models')).status, 503);
   assert.equal(bridge.getRelay(cfg).ready, false);
@@ -162,6 +162,16 @@ test('catalog variants filter consistently and malformed catalogs fail closed', 
   const probe = await bridge.probeUpstream(bridge.resolveTarget(cfg), '/v1/models', cfg);
   assert.equal(probe.modelCount, 0); assert.equal(bridge.getRelay(cfg).ready, false);
   assert.equal((await bridge.diagnosticRequest(target, '/v1/messages/count_tokens', { model: 'gpt-fable' })).status, 400);
+});
+
+test('catalog discovery accepts all supported shapes and preserves an unfiltered response byte-for-byte', () => {
+  const rows = [{ id: 'gpt-6-astra', owned_by: 'mirasim' }, { id: 'kimi-code/k3' }];
+  for (const value of [rows, { data: rows }, { models: rows }, { items: rows }, { result: { models: rows } }]) {
+    assert.deepEqual(bridge.catalogRows(value).map((m) => typeof m === 'string' ? m : m.id), ['gpt-6-astra', 'kimi-code/k3']);
+  }
+  assert.deepEqual(bridge.catalogRows({ models: { 'gpt-6-astra': { owned_by: 'mirasim' } } }).map((m) => m.id), ['gpt-6-astra']);
+  assert.deepEqual(bridge.catalogRows({ data: [] }), []);
+  assert.throws(() => bridge.catalogRows({ broken: true }), /Invalid/);
 });
 
 test('shutdown deadline includes stuck registration, closes listener and cannot later resume work', async () => {

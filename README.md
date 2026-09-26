@@ -1,8 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.1**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.2**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
 
-**0.8.1**：模型目录自动获取（不再写死系列，GLM 等新系列自动进入）；配对复核证明经 bridge 与直连的模型指纹一致（VERIFY.md）；控制台换 Mirasim 图标与配色，新增请求趋势、各模型延迟、运行日志页；Kimi 推理档、Codex 专用账号可在网页按账号设置；新增账号时分组下拉选择；减少发往 Mirasim 的合成探测。
+**0.8.2**：修复新增 Google/GitHub 账号时邮箱被浏览器填入 profile 的问题，自动生成合法 profile；模型目录解析和额度快照进一步兼容上游格式。
 
 **0.8.0**：多个 Mira 账号共用一个 bridge 地址，网页登录后自动托管并注册到 sub2；网页升级同时更新宿主机后台，不再需要进服务器终端（从 0.7.x 升级需最后一次运行安装器，见 [UPGRADE-0.8.0.md](UPGRADE-0.8.0.md)）；网页新增全部账号一览、按账号暂停/恢复调度。
 
@@ -50,7 +50,7 @@ session 后端：调用方/sub2api → bridge:8787 → Mirasim 本地会话端�
 
 调用方使用 `x-api-key: <bridge_secret>` 或 `Authorization: Bearer <bridge_secret>`。这同样适用于 `/__live`、`/__health`、`/__status`。随机路径前缀与会话 token 都是敏感信息，发现/观测输出仅保留路径指纹。
 
-兼容处理会改变请求：`/v1/messages` 注入 Claude Code system 文本、清理部分参数和空块；默认删除采样参数，模型列表放行 `^(claude-|gpt-|deepseek-|kimi-)` 且排除 `fable`。模型名原样转发。客户端 system 文本保留，但不能承诺所有模型上的行为完全不变。默认规则来自实测，可能随 Mirasim 更新失效。
+兼容处理会改变请求：`/v1/messages` 只对 Claude 注入 relay 强制要求的 Claude Code system 文本，并清理上游明确拒绝的字段。模型目录默认不按系列或 fable 隐藏；上游目录中的新系列会自动出现并同步到 sub2。已知暂时无容量的 DeepSeek 型号默认标为不可调度，但仍会显示在网页目录中，可在确认恢复后启用。模型名和响应模型字段原样保留；客户端 system 文本保留，但请求侧的兼容清理意味着不能承诺字节级请求相同。
 
 **Messages 接口保留四个系列；relay 后端另提供 GPT 原生 `/v1/responses` 与 `/v1/responses/compact`。** 未实现 `/v1/chat/completions` 或不同协议间的转换。Responses 不注入 CC system，支持 SSE 和非流式 response JSON。参见 [MULTI-MODEL.md](MULTI-MODEL.md)。
 
@@ -88,7 +88,7 @@ node mirasim-bridge.js serve
 | `sub2api.manage_existing_groups` | 默认 false，保留后台修改的既有账号分组；新账号仍使用 group_ids |
 | `sub2api.concurrency` / `forward.max_concurrency` | 均默认 2，建议同步修改 |
 | `forward.kimi_max_concurrency` | 默认 1，每个 worker 的 Kimi 并发上限 |
-| `constraints.disabled_models` | 默认排除当前上游不可用的三个 DeepSeek 型号，空数组可重新启用 |
+| `constraints.disabled_models` | 默认排除当前实测无容量的三个 DeepSeek 型号；它们仍会在目录中显示，清空数组可重新启用 |
 | `constraints.kimi_default_effort` | 默认 low；保留调用方显式推理配置，空字符串关闭默认注入 |
 | `quota.enabled` / `quota.sync_notes` / `quota.interval_sec` | 默认开启查询和备注同步，每 300 秒一次 |
 | `diagnostics.timeout_sec` / `diagnostics.max_tokens` | bridge 检测默认 30 秒、128 token，不改变 sub2 内置测试超时 |

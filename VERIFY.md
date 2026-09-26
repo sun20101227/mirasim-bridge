@@ -72,7 +72,7 @@ bridge 计数：`injected=2`（只给两个 Claude 请求注入身份块，Kimi 
 
 - bridge 计数（最终版代码复跑）：41 次请求，`injected=21`（只有 Claude 请求被注入身份块），`fallback=0`，`sampling_retried=0`，`cc_retried=0`。
 - 措辞差异（如 sonnet 一次说 “made by Anthropic”、一次说 “developed by Anthropic”）来自采样随机性：relay 不接受 temperature 等采样参数，直连也无法固定。
-- bridge 在请求侧做的全部改写：Claude 注入身份块（上游强制）；剥离上游拒绝的采样参数、`cache_control.scope`、顶层 null 字段、空文本块；合并连续 assistant 消息；过滤纯空白 stop_sequences；补默认 max_tokens；Kimi 在客户端未指定 thinking/output_config 时补默认推理档（可在网页设为“不干预”）。响应侧逐字节透传，只增删传输相关头（去掉 content-length，加 x-bridge-request-id、x-accel-buffering）。
+- bridge 在请求侧做的全部改写：Claude 注入身份块（上游强制）；剥离上游拒绝的采样参数、`cache_control.scope`、顶层 null 字段、空文本块；合并连续 assistant 消息；过滤纯空白 stop_sequences；补默认 max_tokens；Kimi 在客户端未指定 thinking/output_config 时补默认推理档（可在网页设为“不干预”）。响应侧逐字节透传，只处理传输所需的头（流式响应去掉可能失真的 content-length，并禁用代理缓冲），不添加 bridge 专用响应头。
 - 目录新增 `claude-opus-5-5`、`glm-5.3-flash`；0.8.1 起目录不再按写死的系列过滤，GLM 已经验证可用并自动进入 sub2 映射。GPT/DeepSeek 本机仍无容量，需在服务器复测。
 
 ## 逐轮查看路由（模型替换）
