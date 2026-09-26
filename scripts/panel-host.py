@@ -12,8 +12,8 @@ ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
           '/panel/icon.png': ('icon.png', 'image/png')}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'codex', 'logs'}
-READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check'}
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs'}
+READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'membership/refresh'}
 
 
 def command_input(args, data, timeout=55):
@@ -197,7 +197,7 @@ class Console:
             return {'accepted': accepted, **self.agent.status()}
         if op not in OPERATIONS | {'start', 'stop', 'attach'}:
             raise ValueError('Unknown operation')
-        readonly = op in READ_OPERATIONS or (op == 'codex' and data.get('enabled') is None)
+        readonly = op in READ_OPERATIONS or (op in ('codex', 'window-keeper') and data.get('enabled') is None)
         # Refreshes do not change host topology: they must not compete with OAuth
         # completion for the deployment mutex. Mutations remain serialized.
         acquired = False

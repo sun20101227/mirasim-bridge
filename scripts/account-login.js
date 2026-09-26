@@ -11,6 +11,7 @@ function profileConfig(base, name, flags) {
   const cfg = deepMerge(deepMerge({}, DEFAULT_CONFIG), base);
   delete cfg._config_path;
   cfg.backend = 'relay'; cfg.keepalive.enabled = false;
+  cfg.window_keeper = { ...cfg.window_keeper, enabled: false, state_id: '' };
   cfg.relay.setting_json = 'setting.json';
   cfg.sub2api.account_name = flags['account-name'] || `${base.sub2api?.account_name || 'mirasim-cloud'}-${name}`;
   if (cfg.sub2api.account_name === base.sub2api?.account_name) throw Error('新账号必须使用不同的 sub2api 账号名');

@@ -33,6 +33,8 @@
     "timeout_sec": 30,
     "max_tokens": 128
   },
+  "membership": { "enabled": true, "interval_sec": 900 },
+  "window_keeper": { "enabled": false, "model": "", "windows": ["5h", "7d"], "max_per_day": 6, "state_id": "" },
   "health": {
     "interval_sec": 30,
     "fail_threshold": 2,

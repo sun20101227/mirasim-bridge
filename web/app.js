@@ -6,6 +6,7 @@ let selected = { target: 'main', account: 'main' };
 let fleetRows = [], bridgeVersion = null, modelRows = [], modelsFor = '', groupsCache = null;
 let actionsBusy = 0, accessHideTimer = null, accessFor = '', loginFinishing = false;
 const connectionResults = new Map();
+let keeperModelsFor = '';
 const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', logs: '运行日志', release: '版本与升级' };
 const KNOWN = ['claude', 'gpt', 'deepseek', 'kimi'];
 const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi', glm: 'GLM', other: '其他' };
@@ -14,6 +15,7 @@ const familyOrder = (f) => (KNOWN.includes(f) ? KNOWN.indexOf(f) : 10);
 const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '运行设置', codex: 'Codex 账号', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
 const SCHED = { on: ['已入池', 'ok'], off: ['已暂停', 'warn'], unmanaged: ['未接管', ''], unknown: ['等待确认', 'warn'] };
 Object.assign(ACTIONS, { 'account/access': '查看接入密钥', 'account/check': '检测账号连接' });
+Object.assign(ACTIONS, { 'membership/refresh': '查询会员状态', 'window-keeper': '窗口任务设置', 'window-keeper/check': '检查额度窗口' });
 async function groups() { if (!groupsCache) groupsCache = await api('groups', {}, 'main'); return groupsCache; }
 function fillGroups(select, platforms, current, placeholder) {
   const keep = current ?? select.value;
@@ -89,6 +91,52 @@ async function checkConnection(target, account) {
   connectionResults.set(`${target}|${account}`, r); renderConnection(); return r;
 }
 function quotaLevel(pct) { return pct == null ? '' : pct < 10 ? 'bad' : pct < 30 ? 'warn' : 'ok'; }
+function membershipLabel(m) {
+  if (!m?.available || m.stale) return ['会员状态待查询', 'warn'];
+  const expiry = Date.parse(m.expires_at);
+  return !Number.isFinite(expiry) ? [`${m.plan} · 未提供到期时间`, ''] : expiry <= Date.now()
+    ? [`${m.plan} · 已到期`, 'bad'] : [`${m.plan} · ${relative(expiry)}到期`, expiry - Date.now() < 3 * 86400000 ? 'warn' : 'ok'];
+}
+function renderMembership(m) {
+  const [text, tone] = membershipLabel(m), box = $('membership'); box.replaceChildren(node('strong', text)); box.dataset.tone = tone;
+  if (m?.expires_at) box.append(node('span', `到期时间：${new Date(m.expires_at).toLocaleString()}${m.stale ? '（历史值）' : ''}`));
+  if (m?.observed_at) box.append(node('span', `查询于 ${new Date(m.observed_at).toLocaleString()}`));
+}
+const KEEPER_REASONS = { disabled: '已关闭', checking: '正在检查窗口', waiting_for_window: '等待窗口到期或空闲证据', window_due: '窗口需要启动',
+  quota_unknown: '额度信息未知或已过期', quota_exhausted: '额度暂不可用', unmetered: '账号不计量，无需启动窗口', account_restricted: '上游限制中，已跳过',
+  daily_cap: '已达到滚动 24 小时次数上限', minimum_interval: '等待最小请求间隔', account_busy_or_paused: '账号忙碌或已暂停',
+  membership_unavailable: '会员未知或已到期，已跳过', another_worker: '另一任务正在处理', model_unavailable: '所选模型当前不可用',
+  stale_lock: '存在中断任务的锁，已停止发送；请确认旧任务停止后恢复', duplicate_identity: '同一 Mira 身份配置了重复任务，已暂停发送',
+  accepted: '请求成功，等待窗口确认', confirmed: '复查确认窗口已在计时', unverified: '尚未确认窗口，等待完整周期后再检查',
+  ambiguous: '请求结果不确定，暂不重发', failed: '请求失败，等待退避', dispatched: '发送记录已保存',
+  state_unreadable: '状态文件不可读，已停止发送；请恢复记录', state_or_probe_error: '状态存储或预检失败，本轮已停止' };
+async function keeperCard() {
+  const data = await api('window-keeper', scoped()), identity = `${selected.target}|${selected.account}`;
+  const box = $('keeper-status'); box.replaceChildren(node('strong', KEEPER_REASONS[data.reason] || data.reason));
+  box.append(node('span', `近 24 小时已发送 ${data.sent_last_24h || 0} / ${data.max_per_day || 6} 次`));
+  box.dataset.tone = ['state_unreadable', 'state_or_probe_error', 'failed'].includes(data.reason) ? 'bad' : data.reason === 'confirmed' ? 'ok' : '';
+  $('check-keeper').disabled = !data.enabled;
+  if (document.activeElement?.form !== $('keeper-form')) {
+    $('keeper-enabled').checked = data.enabled; $('keeper-cap').value = data.max_per_day || 6;
+    $('keeper-5h').checked = data.windows?.includes('5h'); $('keeper-7d').checked = data.windows?.includes('7d');
+    if (keeperModelsFor !== identity) {
+      $('keeper-model').replaceChildren(node('option', '请选择模型…')); $('keeper-model').firstChild.value = '';
+      try {
+        const options = await api('models', scoped());
+        for (const m of options.filter(m => m.enabled || m.id === data.model)) { const o = node('option', m.id); o.value = m.id; $('keeper-model').append(o); }
+      } catch {
+        if (data.model) { const o = node('option', data.model); o.value = data.model; $('keeper-model').append(o); }
+        box.append(node('span', '模型目录暂不可用，保留当前选择；可稍后刷新。'));
+      }
+      keeperModelsFor = identity;
+    }
+    $('keeper-model').value = data.model || '';
+  }
+  $('keeper-history').replaceChildren(...(data.attempts || []).map(a => {
+    const line = node('div', '', 'event'); line.append(node('time', new Date(a.at).toLocaleString()),
+      node('div', `${a.model} · ${(a.windows || []).join(' / ')}`), pill(KEEPER_REASONS[a.outcome] || a.outcome, a.outcome === 'confirmed' ? 'ok' : 'warn')); return line;
+  }));
+}
 function quotaMini(quota) {
   const box = node('div', '', 'quota-mini');
   if (!quota || !quota.available || quota.stale) { box.append(node('span', quota?.stale ? '额度已过期' : '额度未知', 'hint')); return box; }
@@ -123,6 +171,7 @@ async function fleet() {
     const a = r.summary, row = node('button', '', 'fleet-row'); row.type = 'button';
     if (r.target === selected.target && r.account === selected.account) row.classList.add('current');
     const name = node('div', '', 'fleet-name'); name.append(node('b', label(r)), node('span', a.account_name ? `sub2: ${a.account_name}` : r.error || '', 'hint'));
+    const [memberText, memberTone] = membershipLabel(a.membership); name.append(pill(memberText, memberTone));
     const state = node('div', '', 'fleet-state');
     if (r.error) state.append(pill('无法连接', 'bad'));
     else {
@@ -174,6 +223,7 @@ async function overview() {
   bridgeVersion = null; $('current-version').textContent = '—';
   const s = await api('summary', scoped()), runtime = await api('status', scoped());
   const sub = runtime.sub2api || {};
+  renderMembership(runtime.membership);
   bridgeVersion = runtime.version || null;
   stat('stat-version', runtime.version || '未知');
   $('current-version').textContent = runtime.version || '—'; $('aside-version').textContent = runtime.version ? `bridge ${runtime.version}` : '';
@@ -207,6 +257,7 @@ async function overview() {
     if (s.kimi_default_effort !== undefined) $('kimi-effort').value = s.kimi_default_effort;
   }
   await codexCard();
+  if (view === 'accounts') await keeperCard();
 
   renderTrend(runtime.history); renderLatency(runtime.latency);
   const quota = runtime.quota || {};
@@ -401,7 +452,7 @@ async function checkRelease(force = false) {
   $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : older ? '当前运行版本高于发布源' : pinned ? '已是固定版本；可切换为跟随最新发布' : '已是最新版本';
 }
 async function refresh() {
-  groupsCache = null;
+  groupsCache = null; keeperModelsFor = '';
   // Keep recovery controls available when account reads fail.
   try { await fleet(); await overview(); await profiles(); } finally { await deployment(); }
   if (view === 'models') await models(); if (view === 'logs') await logs();
@@ -414,6 +465,7 @@ async function showView(next) {
   if (next === 'release' && host && $('latest-version').textContent === '—') checkRelease().catch(() => {});
   if (next === 'models' && key && modelsFor !== `${selected.target}|${selected.account}`) models().catch((e) => notice(e.message, true));
   if (next === 'logs' && key) logs().catch((e) => notice(e.message, true));
+  if (next === 'accounts' && key) keeperCard().catch((e) => notice(e.message, true));
 }
 for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => showView(button.dataset.view));
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
@@ -437,6 +489,21 @@ $('copy-key').addEventListener('click', guarded(async () => {
 $('check-account').addEventListener('click', guarded(async () => {
   $('connection-check').replaceChildren(node('strong', '正在检测当前账号…'));
   await checkConnection(selected.target, selected.account);
+}));
+$('refresh-membership').addEventListener('click', guarded(async () => {
+  renderMembership(await api('membership/refresh', scoped())); notice('会员状态已查询');
+}));
+$('keeper-form').addEventListener('submit', guarded(async () => {
+  const enabled = $('keeper-enabled').checked, windows = ['5h', '7d'].filter(w => $('keeper-' + w).checked);
+  if (!windows.length) throw Error('至少选择一个窗口');
+  const model = $('keeper-model').value;
+  if (enabled && !model) throw Error('请选择短请求模型');
+  await api('window-keeper', scoped({ enabled, model, windows, max_per_day: Number($('keeper-cap').value) }));
+  notice(enabled ? '自动窗口已启用。后台将按需发送 hi，会消耗上游额度。' : '自动窗口已关闭，原发送记录保留。');
+  await keeperCard();
+}));
+$('check-keeper').addEventListener('click', guarded(async () => {
+  const r = await api('window-keeper/check', scoped()); notice(r.accepted ? '检查任务已接受，窗口是否开启以之后的复查记录为准。' : '任务未启用'); await keeperCard();
 }));
 $('check-all-accounts').addEventListener('click', guarded(async () => {
   const box = $('fleet-checks'); box.replaceChildren();

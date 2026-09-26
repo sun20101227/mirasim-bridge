@@ -24,8 +24,10 @@ const { execFileSync, spawn, spawnSync } = require('node:child_process');
 const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = require('./lib/relay');
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
+const { summarizeMembership } = require('./lib/membership');
+const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.8.5';
+const VERSION = '0.8.6';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -69,6 +71,8 @@ const DEFAULT_CONFIG = {
   // sub2api 里各自一个账号、同一个 base_url。只在 backend=relay 下可用。
   accounts: { hosted: [] },
   quota: { enabled: true, interval_sec: 300, sync_notes: true },
+  membership: { enabled: true, interval_sec: 900 },
+  window_keeper: { ...windowKeeper.DEFAULTS, windows: ['5h', '7d'] },
   diagnostics: { timeout_sec: 30, max_tokens: 128 },
   health: { interval_sec: 30, fail_threshold: 2, success_threshold: 2, min_dwell_sec: 60 },
   forward: {
@@ -282,6 +286,9 @@ function validateConfig(cfg) {
   if (!Array.isArray(cfg.constraints.disabled_models) || cfg.constraints.disabled_models.some((s) => typeof s !== 'string' || !s.trim())) throw new Error('disabled_models 必须是模型 ID 数组');
   if (!['', 'low', 'high', 'max'].includes(cfg.constraints.kimi_default_effort)) throw new Error('kimi_default_effort 必须为空/low/high/max');
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
+  if (typeof cfg.membership.enabled !== 'boolean' || !Number.isInteger(cfg.membership.interval_sec) || cfg.membership.interval_sec < 60) throw new Error('membership 需要布尔开关和至少 60 秒的查询间隔');
+  windowKeeper.validateConfig(cfg.window_keeper);
+  if (cfg.window_keeper.enabled && (cfg.backend !== 'relay' || !cfg.quota.enabled || !cfg.membership.enabled)) throw new Error('自动窗口需要 relay 后端及额度、会员查询');
   if (!Number.isInteger(cfg.diagnostics.timeout_sec) || cfg.diagnostics.timeout_sec < 1 || cfg.diagnostics.timeout_sec > 600 || !Number.isInteger(cfg.diagnostics.max_tokens) || cfg.diagnostics.max_tokens < 1 || cfg.diagnostics.max_tokens > 8192) throw new Error('diagnostics 超时/输出预算无效');
   if (!Number.isInteger(cfg.constraints.default_max_tokens) || cfg.constraints.default_max_tokens < 1) throw new Error('default_max_tokens 必须是正整数');
   const hosted = cfg.accounts.hosted;
@@ -1587,10 +1594,46 @@ async function refreshQuota(cfg, ctx, { force = false } = {}) {
   if (cfg.quota.sync_notes && ctx.sm && !ctx.shuttingDown) {
     const a = await s2.getAccount(cfg, ctx.sm.accountId);
     if (a?.name !== cfg.sub2api.account_name || a?.platform !== 'anthropic' || a?.type !== 'apikey') throw Error('额度同步账号不匹配');
-    const notes = mergeQuotaNote(a.notes, quotaNote(snapshot || ctx.quota, { stale: ctx.quota.stale }));
+    const notes = mergeQuotaNote(a.notes, quotaNote(snapshot || ctx.quota, { stale: ctx.quota.stale, membership: ctx.membership }));
     if (notes !== a.notes && !ctx.shuttingDown) await s2.updateAccount(cfg, a.id, { notes });
   }
   return ctx.quota;
+}
+
+async function refreshMembership(cfg, ctx, { force = false } = {}) {
+  if (cfg.backend !== 'relay' || !cfg.membership.enabled || ctx.shuttingDown) return ctx.membership;
+  if (ctx.membershipFlight) return ctx.membershipFlight;
+  if (!force && Date.now() < (ctx.nextMembershipAt || 0)) return ctx.membership;
+  ctx.nextMembershipAt = Date.now() + cfg.membership.interval_sec * 1000;
+  ctx.membershipFlight = (async () => {
+    try { ctx.membership = summarizeMembership(await getRelay(cfg).profile({ signal: AbortSignal.timeout(15000) })); }
+    catch { ctx.membership = { ...(ctx.membership || {}), available: Boolean(ctx.membership?.available), stale: true, error: '会员状态查询失败' }; }
+    return ctx.membership;
+  })();
+  try { return await ctx.membershipFlight; } finally { ctx.membershipFlight = null; }
+}
+
+async function runWindowKeeper(cfg, ctx) {
+  if (ctx.hub?.all().some((a) => a.ctx !== ctx && a.cfg.window_keeper.enabled && a.ctx.membership?.account_ref
+    && a.ctx.membership.account_ref === ctx.membership?.account_ref)) {
+    ctx.windowKeeperStatus = { reason: 'duplicate_identity' }; return ctx.windowKeeperStatus;
+  }
+  return windowKeeper.tick(cfg, ctx, {
+    quota: async () => {
+      const res = await getRelay(cfg).request({ path: '/v1/limits', signal: AbortSignal.timeout(15000) });
+      const raw = await readStreamText(res);
+      if (res.statusCode !== 200) throw Error('quota_unavailable');
+      ctx.quota = { ...summarizeLimits(JSON.parse(raw)), stale: false }; return ctx.quota;
+    },
+    modelAllowed: async (model) => isModelAllowed(model, cfg) && (await getDiagnosticCatalog(diagnosticTarget(cfg))).includes(model),
+    send: async (model) => {
+      const response = await diagnosticRequest(diagnosticTarget(cfg), '/v1/messages', {
+        model, max_tokens: 16, stream: true, messages: [{ role: 'user', content: 'hi' }],
+      }, { timeoutMs: 30000 });
+      const result = summarizeModelResponse(response);
+      return { ok: result.ok, status: result.status };
+    },
+  });
 }
 
 /** 注册时用的 base_url：拓扑 B 填 public_base_url，否则指向本机固定端口 */
@@ -1772,6 +1815,7 @@ function accountSummary(acct) {
     disabled_models: cfg.constraints.disabled_models,
     relay: relay ? { ready: relay.ready } : undefined,
     quota: ctx.quota || { available: false, stale: true },
+    membership: ctx.membership || { available: false, stale: true },
     sub2api: {
       managed: Boolean(ctx.sm),
       reachable: Boolean(ctx.reachable),
@@ -3338,7 +3382,9 @@ async function accountHealthTick(acct, { tickCount, withSub2api, args, recheckEv
     }
 
     if (ctx.shuttingDown) return;
+    await refreshMembership(cfg, ctx);
     try { await refreshQuota(cfg, ctx); } catch (err) { warn(`${tag} 额度备注同步失败：${err.message}`); }
+    if (cfg.window_keeper.enabled) await runWindowKeeper(cfg, ctx);
     if (ctx.shuttingDown) return;
     const base = forwardOk && Date.now() >= ctx.backoffUntil && !ctx.hold;
     const healthy = base && ctx.reachable && (!ctx.keepalive || ctx.keepalive.ready);
@@ -3454,6 +3500,7 @@ async function cmdServe(cfg, args) {
   registration = registerAll();
   await registration;
   for (const acct of hub.all()) {
+    await refreshMembership(acct.cfg, acct.ctx);
     try { await refreshQuota(acct.cfg, acct.ctx, { force: true }); } catch (err) { warn(`[${acct.key}] 额度备注同步失败：${err.message}`); }
   }
 }
@@ -3978,4 +4025,4 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
-  getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, sanitizeMessagesRequest };
+  getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest };

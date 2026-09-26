@@ -128,3 +128,13 @@ for (const stage of ['saved', 'validating']) test(`lost callback response is rec
     assert.equal(p.calls.length, 2);
   }
 });
+
+test('membership card displays expired, unknown and stale plan expiry without implying token expiry', () => {
+  const p = page(() => ({}));
+  p.run("renderMembership({available:true,plan:'plus',expires_at:'2020-01-01T00:00:00Z'})");
+  assert.match(p.get('membership').children[0].textContent, /已到期/);
+  p.run("renderMembership({available:true,plan:'basic',expires_at:null})");
+  assert.match(p.get('membership').children[0].textContent, /未提供/);
+  p.run("renderMembership({available:true,stale:true,plan:'plus',expires_at:'2099-01-01T00:00:00Z'})");
+  assert.match(p.get('membership').children[0].textContent, /待查询/);
+});

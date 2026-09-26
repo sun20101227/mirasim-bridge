@@ -30,7 +30,8 @@ $sourceFiles = @(
     'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/icon.png',
     'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
     'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js',
-    'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md', 'tests/web-panel.test.js', 'scripts/verify-package.py', 'RECOVERY.md', 'tests/test_release_source.py', 'UPDATE-TROUBLESHOOTING.md'
+    'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md', 'tests/web-panel.test.js', 'scripts/verify-package.py', 'RECOVERY.md', 'tests/test_release_source.py', 'UPDATE-TROUBLESHOOTING.md',
+    'lib/membership.js', 'lib/window-keeper.js', 'tests/membership-window.test.js', 'MEMBERSHIP-WINDOWS.md'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

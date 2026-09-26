@@ -21,6 +21,8 @@ dist/
 *.sha256
 state.json
 state.json.*.tmp
+window-keeper.json
+window-keeper.json.*
 
 # 运行产物
 *.log

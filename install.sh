@@ -50,9 +50,9 @@ NODE_BIN=$(command -v node)
 [[ "$(node -p 'Number(process.versions.node.split(".")[0]) >= 18')" == true ]] || die 'Node >=18 required'
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 DEST=/opt/mirasim-bridge
-FILES=(mirasim-bridge.js lib/relay.js lib/responses.js lib/login.js lib/quota.js lib/sse.js scripts/account-login.js scripts/deployment.js ACCOUNTS.md UPGRADE-0.5.0.md README.md DEPLOY.md DOCKER.md SUB2API-PLUGIN.md MULTI-MODEL.md RELAY.md AUDIT.md CHANGELOG.md DESIGN.md THIRD-PARTY-NOTICES.md licenses/cpa-plugin-mirasim.txt licenses/CLIProxyAPI.txt config.example.json)
+FILES=(mirasim-bridge.js lib/relay.js lib/responses.js lib/login.js lib/quota.js lib/sse.js lib/panel.js lib/membership.js lib/window-keeper.js web/index.html web/app.js web/style.css web/icon.png scripts/account-login.js scripts/deployment.js scripts/panel-bridge.js MEMBERSHIP-WINDOWS.md ACCOUNTS.md UPGRADE-0.5.0.md README.md DEPLOY.md DOCKER.md SUB2API-PLUGIN.md MULTI-MODEL.md RELAY.md AUDIT.md CHANGELOG.md DESIGN.md THIRD-PARTY-NOTICES.md licenses/cpa-plugin-mirasim.txt licenses/CLIProxyAPI.txt config.example.json)
 for file in "${FILES[@]}" mirasim-bridge.service; do [[ -f "$SCRIPT_DIR/$file" ]] || die "Package incomplete: $file"; done
-for file in mirasim-bridge.js lib/relay.js lib/responses.js lib/login.js lib/quota.js lib/sse.js scripts/account-login.js scripts/deployment.js; do node --check "$SCRIPT_DIR/$file"; done
+for file in mirasim-bridge.js lib/relay.js lib/responses.js lib/login.js lib/quota.js lib/sse.js lib/panel.js lib/membership.js lib/window-keeper.js scripts/account-login.js scripts/deployment.js; do node --check "$SCRIPT_DIR/$file"; done
 EXISTING=0
 if [[ -f "$DEST/config.json" ]]; then
   EXISTING=1
