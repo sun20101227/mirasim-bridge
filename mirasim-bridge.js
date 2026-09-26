@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -2284,7 +2284,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     }
   }
   const status = upRes.statusCode;
-  if (status >= 200 && status < 300 && ctx.keepalive && target.is_keepalive) ctx.keepalive.authFails = 0;
+  if (status >= 200 && status < 300) {
+    ctx.lastUpstreamOkAt = Date.now();   // 健康循环据此省掉紧随其后的合成探测
+    if (ctx.keepalive && target.is_keepalive) ctx.keepalive.authFails = 0;
+  }
 
   // --- 上游 401/403 绝不透传（§2.4）：会把 sub2api 账号打成 error 态永久禁用 ---
   if (status === 401 || status === 403) {
@@ -3198,7 +3201,11 @@ async function accountHealthTick(acct, { tickCount, withSub2api, args, recheckEv
       strict: Boolean(ctx.keepalive),
     });
     let forwardOk = false;
-    if (t) {
+    // relay 后端：这个健康周期内刚有真实请求成功，就不再额外探测——少给 Mirasim 发合成请求
+    const recentOk = cfg.backend === 'relay' && Date.now() - (ctx.lastUpstreamOkAt || 0) < cfg.health.interval_sec * 1000;
+    if (recentOk) {
+      forwardOk = true;
+    } else if (t) {
       const probe = await probeUpstream(t, '/v1/models', cfg);
       forwardOk = probe.status === 200 && probe.modelCount > 0;
       if (ctx.keepalive && t.is_keepalive && [401, 403].includes(probe.status)) ctx.keepalive.noteUpstreamAuthFail();
@@ -3339,9 +3346,10 @@ async function cmdServe(cfg, args) {
     tickCount++;
     try {
       await registration.catch(() => {});
-      for (const acct of hub.all()) {
-        if (ctx.shuttingDown) break;
-        await accountHealthTick(acct, { tickCount, withSub2api, args, recheckEvery: RECHECK_EVERY });
+      // 账号之间互不依赖：分批并行，账号多时 tick 时长不随账号数线性增长
+      const list = hub.all();
+      for (let i = 0; i < list.length && !ctx.shuttingDown; i += 4) {
+        await Promise.all(list.slice(i, i + 4).map((acct) => accountHealthTick(acct, { tickCount, withSub2api, args, recheckEvery: RECHECK_EVERY })));
       }
     } finally {
       running = false;

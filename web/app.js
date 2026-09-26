@@ -3,12 +3,20 @@ const $ = (id) => document.getElementById(id);
 const host = document.body.dataset.mode === 'host';
 let key = '', loginSession = null, timer = null, polling = false, noticeTimer = null;
 let selected = { target: 'main', account: 'main' };
-let fleetRows = [], bridgeVersion = null, modelRows = [];
+let fleetRows = [], bridgeVersion = null, modelRows = [], groupsCache = null;
 const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', release: '版本与升级' };
 const FAMILIES = ['claude', 'gpt', 'deepseek', 'kimi'];
 const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi' };
 const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '并发设置', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
 const SCHED = { on: ['已入池', 'ok'], off: ['已暂停', 'warn'], unmanaged: ['未接管', ''], unknown: ['等待确认', 'warn'] };
+async function groups() { if (!groupsCache) groupsCache = await api('groups', {}, 'main'); return groupsCache; }
+function fillGroups(select, platforms, current, placeholder) {
+  const keep = current ?? select.value;
+  select.replaceChildren(node('option', placeholder));
+  select.firstChild.value = '';
+  for (const g of (groupsCache || []).filter((g) => platforms.includes(g.platform))) { const o = node('option', `${g.id} · ${g.name}（${g.platform}）`); o.value = String(g.id); select.append(o); }
+  select.value = keep != null && [...select.options].some((o) => o.value === String(keep)) ? String(keep) : '';
+}
 
 function notice(text, error = false) {
   clearTimeout(noticeTimer);
@@ -63,14 +71,13 @@ function quotaMini(quota) {
 /** Every Mira account across every target: hosted accounts (0.8.0) plus separate containers. */
 async function fleet() {
   const targets = host ? await api('targets') : [{ name: 'main' }];
-  const rows = [];
-  for (const t of targets) {
+  const rows = (await Promise.all(targets.map(async (t) => {
     try {
       const s = await api('status', { account: 'main' }, t.name);
       const list = Array.isArray(s.accounts) && s.accounts.length ? s.accounts : [{ key: 'main', account_name: '?', sub2api: s.sub2api, quota: s.quota, inflight: s.inflight, counters: s.counters, hold: s.hold }];
-      for (const a of list) rows.push({ target: t.name, account: a.key, version: s.version, hosting: Boolean(s.hosting), summary: a });
-    } catch (e) { rows.push({ target: t.name, account: 'main', error: e.message, summary: {} }); }
-  }
+      return list.map((a) => ({ target: t.name, account: a.key, version: s.version, hosting: Boolean(s.hosting), summary: a }));
+    } catch (e) { return [{ target: t.name, account: 'main', error: e.message, summary: {} }]; }
+  }))).flat();
   fleetRows = rows;
   if (!rows.some((r) => r.target === selected.target && r.account === selected.account)) selected = { target: rows[0]?.target || 'main', account: rows[0]?.account || 'main' };
   $('target').replaceChildren(...rows.map((r) => { const o = node('option', label(r)); o.value = `${r.target}|${r.account}`; return o; }));
@@ -127,6 +134,7 @@ async function overview() {
     if (s.kimi_max_concurrency) $('kimi-concurrency').value = s.kimi_max_concurrency;
     if (s.model_fallback) $('model-fallback').value = s.model_fallback;
   }
+  await codexCard();
 
   const quota = runtime.quota || {};
   $('quota').replaceChildren();
@@ -161,6 +169,20 @@ async function overview() {
   $('refreshed').hidden = false; $('refreshed').textContent = '更新于 ' + new Date().toLocaleTimeString();
 }
 
+async function codexCard() {
+  let cx;
+  try { cx = await api('codex', scoped()); } catch { $('codex-card').hidden = true; return; }   // older bridge without the op
+  $('codex-card').hidden = false;
+  const st = cx.sub2api_codex || {};
+  const pillEl = $('codex-state'); pillEl.hidden = false;
+  const [text, tone] = !cx.enabled ? ['未启用', ''] : st.managed ? [SCHED[st.schedulable]?.[0] || '等待确认', st.schedulable === 'on' ? 'ok' : 'warn'] : ['已启用 · 等待注册', 'warn'];
+  pillEl.className = 'pill' + (tone ? ' ' + tone : ''); pillEl.textContent = `${text}${cx.enabled ? ' · ' + cx.account_name : ''}`;
+  if (document.activeElement?.form !== $('codex-form')) {
+    $('codex-enabled').checked = cx.enabled; $('codex-name').value = cx.custom_name || '';
+    try { await groups(); } catch { /* 无管理连接时只保留手动输入 */ }
+    fillGroups($('codex-group'), ['openai', 'composite'], cx.group_ids?.[0], '选择分组…');
+  }
+}
 async function profiles() {
   const rows = await api('profiles', {}, 'main'); $('profiles').replaceChildren();
   if (!rows.length) $('profiles').append(empty('还没有独立 profile。点击“新增账号”开始。'));
@@ -259,7 +281,7 @@ async function checkRelease() {
   $('update-pill').className = 'pill ' + (newer ? 'info' : 'ok');
   $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : '已是最新版本';
 }
-async function refresh() { await fleet(); await overview(); await profiles(); await deployment(); }
+async function refresh() { groupsCache = null; await fleet(); await overview(); await profiles(); await deployment(); }
 
 for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => {
   const view = button.dataset.view; $('page-title').textContent = titles[view];
@@ -288,12 +310,27 @@ $('target').addEventListener('change', guarded(async () => {
   modelRows = []; $('models').replaceChildren(); $('family-card').hidden = true; $('model-summary').replaceChildren();
   await refresh(); notice(`已选择 ${label(selected)}，模型目录请重新加载。`);
 }));
+$('codex-form').addEventListener('submit', guarded(async () => {
+  const enabled = $('codex-enabled').checked, group_id = Number($('codex-group').value) || undefined;
+  if (enabled && !group_id) throw Error('请选择一个 openai 或 composite 平台分组');
+  const r = await api('codex', scoped({ enabled, group_id, account_name: $('codex-name').value.trim() }));
+  notice(enabled ? (r.registered ? `Codex 账号 ${r.account_name} 已注册，进入调度后即可在 Codex 里使用。` : `已保存，Codex 账号将在健康检查中注册。`) : 'Codex 账号已关闭并暂停。');
+  await overview();
+}));
 $('pause-account').addEventListener('click', guarded(async () => { if (!confirm(`暂停 ${label(selected)} 的调度？它会立即从 sub2 池子里摘出，直到手动恢复。`)) return; const r = await api('account/pause', scoped()); notice(r.paused ? '已暂停调度' : (r.managed ? '暂停请求未完全成功，请到 sub2 后台确认' : '该账号未接入 sub2，已标记为保持暂停'), !r.paused && r.managed); await refresh(); }));
 $('resume-account').addEventListener('click', guarded(async () => { const r = await api('account/resume', scoped()); notice(r.note || '已恢复'); await refresh(); }));
 for (const action of ['start', 'stop']) $(`${action}-account`).addEventListener('click', guarded(async () => { if (!confirm(`${action === 'stop' ? '停止' : '启动'} ${selected.target} 的容器？`)) return; await api(action); notice('操作完成。首次启动可能需要等待数轮健康检查。'); await refresh(); }));
 for (const action of ['deploy', 'rollback']) $(action).addEventListener('click', guarded(async () => { if (!confirm(action === 'deploy' ? '升级所有受管且运行中的 bridge，并同步更新宿主机后台？切换时短暂停服。' : '将所有快照账号和宿主机后台恢复到上一次版本？')) return; const r = await api(action); notice(r.accepted ? '任务已接受，以下进度来自服务器实际状态。' : '未接受：任务正在运行或没有可用回退。', !r.accepted); await deployment(); }));
 $('deploy-status').addEventListener('click', guarded(deployment));
-$('new-account').addEventListener('click', () => { if (loginSession) { $('account-dialog').showModal(); return; } $('account-form').reset(); $('complete-box').hidden = true; $('begin-login').disabled = false; providerChanged(); $('account-dialog').showModal(); });
+$('new-account').addEventListener('click', guarded(async () => {
+  if (loginSession) { $('account-dialog').showModal(); return; }
+  $('account-form').reset(); $('complete-box').hidden = true; $('begin-login').disabled = false; providerChanged(); $('account-dialog').showModal();
+  try { await groups(); } catch { /* 分组读不到时手动输入 */ }
+  const first = (groupsCache || []).find((g) => ['anthropic', 'composite'].includes(g.platform));
+  fillGroups($('group-select'), ['anthropic', 'composite'], first ? first.id : '', '手动输入 ID…'); groupChanged();
+}));
+function groupChanged() { $('group-manual').hidden = Boolean($('group-select').value); }
+$('group-select').addEventListener('change', groupChanged);
 $('close-dialog').addEventListener('click', () => $('account-dialog').close());
 function providerChanged() {
   const email = $('provider').value === 'email', hosted = $('hosted').checked;
@@ -307,7 +344,9 @@ $('account-form').addEventListener('submit', guarded(async () => {
   const hosted = $('hosted').checked;
   const data = { profile: $('profile').value, account_name: $('account-name').value, provider: $('provider').value, email: $('email').value.trim(), hosted };
   if (!hosted) { data.port = Number($('port').value) || undefined; data.public_base_url = $('base-url').value; }
-  if ($('group-id').value) data.group_id = Number($('group-id').value);
+  const groupId = Number($('group-select').value) || Number($('group-id').value);
+  if (!groupId) throw Error('请选择分组，或填写分组 ID');
+  data.group_id = groupId;
   const r = await api('login/start', data, 'main'); loginSession = { ...r, profile: data.profile, hosted }; $('complete-box').hidden = false;
   $('oauth-link').hidden = data.provider !== 'google';
   if (r.url) { const u = new URL(r.url); if (u.protocol !== 'https:') throw Error('授权地址不是 HTTPS'); $('oauth-link').href = r.url; }

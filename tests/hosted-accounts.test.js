@@ -183,7 +183,7 @@ test('login/start with hosted=true registers the profile on the main base_url', 
 });
 
 test('health tick keeps a held account paused and registers late accounts', async (t) => {
-  const dir = tmp(t, 'bridge-hosted-'); const { origin } = await fakeRelay(t);
+  const dir = tmp(t, 'bridge-hosted-'); const { origin, devices } = await fakeRelay(t);
   const cfg = mainConfig(dir, origin); cfg.quota.enabled = false;
   const ctx = b.newAccountCtx('main'); new b.AccountHub(cfg, ctx);
   const probes = [];
@@ -200,4 +200,50 @@ test('health tick keeps a held account paused and registers late accounts', asyn
   ctx.hold = true;
   await b.accountHealthTick(acct, { tickCount: 2, withSub2api: true, args: { flags: {} }, recheckEvery: 10 });
   assert.deepEqual(probes, [true, false], 'held account is reported unhealthy so it never resumes');
+  ctx.hold = false;
+  // A real request that just succeeded stands in for the synthetic /v1/models probe.
+  const before = devices.length;
+  ctx.lastUpstreamOkAt = Date.now();
+  await b.accountHealthTick(acct, { tickCount: 3, withSub2api: true, args: { flags: {} }, recheckEvery: 10 });
+  assert.equal(devices.length, before, 'no probe sent to the relay within a healthy interval');
+  assert.deepEqual(probes.slice(-1), [true]);
+  ctx.lastUpstreamOkAt = Date.now() - cfg.health.interval_sec * 1000 - 1;
+  await b.accountHealthTick(acct, { tickCount: 4, withSub2api: true, args: { flags: {} }, recheckEvery: 10 });
+  assert.equal(devices.length, before + 1, 'stale success: probe again');
+});
+
+test('panel codex op: read state, reject anthropic groups, persist per account, register now, pause on disable', async (t) => {
+  const dir = tmp(t, 'bridge-hosted-'); const { origin } = await fakeRelay(t);
+  const cfg = mainConfig(dir, origin);
+  writeProfile(dir, 'second', { relay: { url: origin, auth_url: origin, setting_json: 'setting.json' } });
+  const ctx = b.newAccountCtx('main'); const hub = new b.AccountHub(cfg, ctx); hub.add('second');
+  const original = { ...b.s2 };
+  b.s2.listGroups = async () => [{ id: 15, name: 'mira', platform: 'anthropic' }, { id: 20, name: 'codex', platform: 'openai' }];
+  t.after(() => Object.assign(b.s2, original));
+  const registered = [];
+  hub.registerAccount = async (acct) => {
+    registered.push(acct.key);
+    const codex = b.managedAccounts(acct.cfg).find((x) => x.key === 'codex');
+    acct.ctx.codex = { sm: { accountId: 88, desired: 'unknown', pauses: 0, async pause() { this.pauses++; return true; } }, reachable: true, name: codex.name, groups: codex.groupIds };
+  };
+  const panel = createPanel(cfg, ctx); t.after(() => panel.close());
+  const initial = await panel.call('codex', { account: 'second' });
+  assert.deepEqual(initial, { account: 'second', enabled: false, account_name: 'mira-second-codex', custom_name: '', group_ids: [], sub2api_codex: { managed: false } });
+  await assert.rejects(panel.call('codex', { account: 'second', enabled: true }), /openai 平台分组/);
+  await assert.rejects(panel.call('codex', { account: 'second', enabled: true, group_id: 15 }), /anthropic/);
+  await assert.rejects(panel.call('codex', { account: 'second', enabled: true, group_id: 99 }), /不存在/);
+  await assert.rejects(panel.call('codex', { account: 'second', enabled: true, group_id: 20, account_name: 'mira-second' }), /不能与主账号相同/);
+  const on = await panel.call('codex', { account: 'second', enabled: true, group_id: 20 });
+  assert.equal(on.saved, true); assert.equal(on.registered, true); assert.equal(on.sub2api_codex.managed, true);
+  assert.deepEqual(registered, ['second']);
+  const second = hub.get('second');
+  assert.deepEqual(second.ctx.codex.groups, [20]); assert.equal(second.ctx.codex.name, 'mira-second-codex');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'profiles/second/config.json'))).sub2api.openai_account, { enabled: true, account_name: '', group_ids: [20] });
+  assert.equal(cfg.sub2api.openai_account.enabled, false, 'main account untouched');
+  const sm = second.ctx.codex.sm;
+  const off = await panel.call('codex', { account: 'second', enabled: false });
+  assert.equal(off.enabled, false); assert.equal(off.sub2api_codex.managed, false);
+  assert.equal(sm.pauses, 1); assert.equal(second.ctx.codex.sm, null);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'profiles/second/config.json'))).sub2api.openai_account.enabled, false);
+  assert.deepEqual(registered, ['second'], 'disable does not re-register');
 });

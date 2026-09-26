@@ -237,3 +237,6 @@ label.check input{width:auto}
 @media(max-width:700px){.picker{width:100%}.picker select{flex:1}.fleet-row{grid-template-columns:1fr;gap:8px;padding:12px}.profile-row .row{width:100%}}
 .fleet-row{white-space:normal}
 .fleet-row .pill{white-space:nowrap}
+#codex-form .check{align-self:center;padding-bottom:6px}
+#codex-form label:not(.check){min-width:220px;flex:0 1 240px}
+@media(max-width:700px){#codex-form label{flex:1 1 100%}}

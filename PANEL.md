@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.8.0）
+# Mira 网页管理后台（0.8.1）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -14,13 +14,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.0/mirasim-bridge-0.8.0-source.zip \
-  -o mirasim-bridge-0.8.0-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.1/mirasim-bridge-0.8.1-source.zip \
+  -o mirasim-bridge-0.8.1-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.0/mirasim-bridge-0.8.0-source.zip.sha256 \
-  -o mirasim-bridge-0.8.0-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.0-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.0-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.1/mirasim-bridge-0.8.1-source.zip.sha256 \
+  -o mirasim-bridge-0.8.1-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.1-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.1-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
@@ -84,7 +84,7 @@ server {
 
 ## 4. 邮箱验证码 / Google 添加新账号
 
-1. “账号管理 → 新增账号”，填写唯一 profile、sub2 账号名和真实分组 ID（anthropic/composite）。
+1. “账号管理 → 新增账号”，填写唯一 profile、sub2 账号名，在下拉里选一个 anthropic/composite 分组（读不到分组列表时可手动填 ID）。
 2. 选择 **邮箱验证码**，输入邮箱，点击发送，然后输入邮件中的验证码。错误可重试，最多 5 次，发送间隔至少 60 秒。验证码由 Mirasim 发出。
 3. 或选择 **Google 授权**，在无痕窗口打开授权链接，完成后复制地址栏的最终回调 URL，粘贴到表单并验证。回调打不开属服务器登录的正常情况；不要把含 token 的地址发到聊天或日志。
 4. 保存成功后，原账号的凭证保持不变，新凭证保存在 `/data/profiles/名字/`。
@@ -104,6 +104,7 @@ server {
 - 启用/停用模型后，下一轮健康检查持久化并验证 sub2 模型映射。被其他过滤规则屏蔽的模型不能只靠取消 disabled 状态启用。
 - DeepSeek 默认禁用，因为之前实际请求返回上游无容量；界面启用不能修复上游容量。Kimi 上游慢响应仍可能发生。
 - 停止账号会排空连接并尝试暂停 sub2 账号；sub2 管理 API 故障时需确认暂停。启动后等待健康与注册检查完成。
+- “Codex 专用账号”卡片按账号开关 openai 平台账号（见 [CODEX.md](CODEX.md)）；必须选 openai 或 composite 分组。
 - 管理记录只保存最近 100 条动作、目标、时间、结果，不记录验证码、token、邮箱或回调 URL。
 
 ## 单 bridge 页面（可选）

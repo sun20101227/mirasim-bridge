@@ -27,13 +27,15 @@ Codex ──/v1/responses──▶ sub2api（openai 分组，原样转发）─�
 
 ### 2. 打开 bridge 的 Codex 账号
 
-修改 bridge 配置（Docker 部署的改法见 [DOCKER.md](DOCKER.md) 的“修改配置”一节），在 `sub2api` 下增加：
+**网页方式（0.8.1 起）**：后台“账号管理 → Codex 专用账号”，勾选“启用”，在下拉里选刚建的 openai 分组，可选填账号名，点“保存”。bridge 会立即在 sub2api 里创建该账号（默认名 `账号名-codex`，platform=openai、type=apikey），只映射 `gpt-*` 模型，并与所属 Mira 账号一起暂停/恢复。卡片右上角显示它的调度状态；托管的每个 Mira 账号都可以各自开一个。
+
+**配置文件方式**：在该账号配置的 `sub2api` 下增加：
 
 ```json
 "openai_account": { "enabled": true, "account_name": "mirasim-codex", "group_ids": [20] }
 ```
 
-重启 bridge 后，它会在 sub2api 里自动创建 `mirasim-codex`（platform=openai、type=apikey），只映射 `gpt-*` 模型，并与主账号一起暂停/恢复。网页后台“连接信息”里的 **Codex 账号** 一行会显示它的调度状态。
+重启 bridge 后效果相同（Docker 部署的改法见 [DOCKER.md](DOCKER.md) 的“修改配置”一节）。
 
 ### 3. 配置 Codex
 

@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css')}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume'}
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'codex'}
 
 
 def command_input(args, data, timeout=55):
