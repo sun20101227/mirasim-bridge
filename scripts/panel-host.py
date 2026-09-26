@@ -9,9 +9,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
-          '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css')}
+          '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
+          '/panel/icon.png': ('icon.png', 'image/png')}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'codex'}
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'codex', 'logs'}
 
 
 def command_input(args, data, timeout=55):
@@ -186,7 +187,7 @@ class Console:
                 if op == 'login/start':
                     data = self.login_options(data)
                 result = self.bridge(self.target(name), op, data)
-            if op not in {'status', 'summary', 'models', 'profiles', 'groups', 'login/status', 'accounts'}:
+            if op not in {'status', 'summary', 'models', 'profiles', 'groups', 'login/status', 'accounts', 'logs', 'codex'} or (op == 'codex' and data.get('enabled') is not None):
                 self.audit(op, name, True)
             return result
         except Exception:
@@ -221,9 +222,9 @@ def handler(agent, token, fallback, persist):
             if file == 'index.html':
                 raw = raw.replace(b'data-mode="bridge"', b'data-mode="host"')
             self.send_response(200)
-            for key, value in {'Content-Type': mime + '; charset=utf-8', 'Content-Length': str(len(raw)),
+            for key, value in {'Content-Type': mime + ('' if mime.startswith('image/') else '; charset=utf-8'), 'Content-Length': str(len(raw)),
                                'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-                               'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"}.items():
+                               'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"}.items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(raw)

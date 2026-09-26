@@ -70,6 +70,7 @@ test('HTTP forwarding and cancellation', { timeout: 15000 }, async (t) => {
   const cfg = config();
   cfg.forward.upstream_headers_timeout_ms = 80;
   cfg.constraints.disabled_models = []; // explicit opt-in still supports DeepSeek if upstream recovers
+  cfg.constraints.model_filter = '^(claude-|gpt-|deepseek-|kimi-)'; // the default is now open; this test exercises an explicit allow-list
   const ctx = {
     keepalive: { pid: 123456, ready: true, authFails: 0, noteUpstreamAuthFail() { this.authFails++; } },
     inflight: 0, backoffUntil: 0, startedAt: Date.now(),

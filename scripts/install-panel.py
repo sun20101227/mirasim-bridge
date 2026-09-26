@@ -35,7 +35,7 @@ def main():
     destination = Path('/opt/mirasim-deploy')
     files = {'deploy-agent.py': source / 'scripts/deploy-agent.py',
              'panel-host.py': source / 'scripts/panel-host.py',
-             **{'web/' + n: source / 'web' / n for n in ('index.html', 'app.js', 'style.css')}}
+             **{'web/' + n: source / 'web' / n for n in ('index.html', 'app.js', 'style.css', 'icon.png')}}
     contents = {name: file.read_bytes() for name, file in files.items()}
     # Single service owns the journal. Stop it before replacing its code/config.
     module.command(['systemctl', 'stop', 'mirasim-deploy.service'], timeout=240)

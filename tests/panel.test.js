@@ -105,7 +105,7 @@ test('panel concurrency settings validate range, persist without env secrets and
   cfg.bridge_secret = 'secret-from-env-only';
   for (const bad of [{ max_concurrency: 0, kimi_max_concurrency: 1 }, { max_concurrency: 17, kimi_max_concurrency: 1 },
     { max_concurrency: 2, kimi_max_concurrency: 3 }, { max_concurrency: '4', kimi_max_concurrency: 1 }]) await assert.rejects(panel.call('settings', bad));
-  assert.deepEqual(await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2 }), { saved: true, account: 'main', max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'observe' });
+  assert.deepEqual(await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2 }), { saved: true, account: 'main', max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'observe', kimi_default_effort: 'low' });
   await assert.rejects(panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'always' }), /替换策略/);
   assert.equal((await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'forbid' })).model_fallback, 'forbid');
   assert.equal(JSON.parse(fs.readFileSync(cfg._config_path)).constraints.model_fallback, 'forbid');

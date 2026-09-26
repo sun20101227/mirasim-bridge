@@ -20,7 +20,8 @@ HOST_DIR = Path('/opt/mirasim-deploy')
 # Host tools ship inside the same digest-pinned bridge image; they are copied out only after the
 # image passed version + selftest checks, so one web click upgrades containers AND this service.
 HOST_FILES = {'deploy-agent.py': '/app/scripts/deploy-agent.py', 'panel-host.py': '/app/scripts/panel-host.py',
-              'web/index.html': '/app/web/index.html', 'web/app.js': '/app/web/app.js', 'web/style.css': '/app/web/style.css'}
+              'web/index.html': '/app/web/index.html', 'web/app.js': '/app/web/app.js', 'web/style.css': '/app/web/style.css',
+              'web/icon.png': '/app/web/icon.png'}
 SERVICE_FILES = ('deploy-agent.py', 'panel-host.py')
 
 

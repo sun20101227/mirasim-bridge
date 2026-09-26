@@ -94,7 +94,7 @@ const DEFAULT_CONFIG = {
     // 旧版实测只有 haiku 接受；2026-09-25 复核发现 haiku 的 temperature=0.8 也被拒了
     //（自愈重试兜住才开始怀疑，日志确认）。默认空串 = 全部剥离，交给上游去演化。
     sampling_models: '',
-    model_filter: '^(claude-|gpt-|deepseek-|kimi-)', // Messages 支持四系列；relay 另提供 GPT Responses
+    model_filter: '',           // 空 = 上游目录里的模型全部放行（除 model_block/disabled_models）；新系列自动出现，无需改配置
     model_block: 'fable',       // 黑名单正则：不发往上游、不出现在 /v1/models。空串放行全部
     default_max_tokens: 8192,   // max_tokens 缺失 / 0 / 负数时回落到这个值
     disabled_models: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'],
@@ -307,12 +307,21 @@ function ts() {
   return new Date().toISOString();
 }
 
+// 最近 400 行日志留在内存里，供网页“运行日志”查看（日志本来就不打印密钥/凭证/对话内容）
+const LOG_RING = [];
+function pushLog(line) { LOG_RING.push(line); if (LOG_RING.length > 400) LOG_RING.splice(0, LOG_RING.length - 400); }
+function recentLogs(limit = 200) { return LOG_RING.slice(-Math.max(1, Math.min(400, Number(limit) || 200))); }
+
 function log(msg) {
-  process.stdout.write(`[${ts()}] ${msg}\n`);
+  const line = `[${ts()}] ${msg}`;
+  pushLog(line);
+  process.stdout.write(line + '\n');
 }
 
 function warn(msg) {
-  process.stdout.write(`[${ts()}] WARN ${msg}\n`);
+  const line = `[${ts()}] WARN ${msg}`;
+  pushLog(line);
+  process.stdout.write(line + '\n');
 }
 
 function fatal(msg) {
@@ -962,6 +971,7 @@ function sameModel(a, b) {
 function noteServedModel(ctx, cfg, requested, served) {
   if (!requested || !served || sameModel(requested, served)) return false;
   ctx.counters.fallback = (ctx.counters.fallback || 0) + 1;
+  bumpHistory(ctx, 'fallback');
   ctx.lastFallback = { requested: String(requested).slice(0, 160), served: String(served).slice(0, 160), at: new Date().toISOString() };
   const forbid = cfg.constraints.model_fallback === 'forbid';
   warn(`模型被替换：请求 ${ctx.lastFallback.requested}，实际 ${ctx.lastFallback.served}${forbid ? '（forbid：中断本轮）' : ''}`);
@@ -1066,8 +1076,13 @@ function mergeConsecutiveAssistants(messages) {
  * 只有在 error 为 null 时才把 body 发出去——宁可本地回一个说人话的 400，
  * 也不让客户端收到那句什么都诊断不了的 "rejected as invalid"。
  */
+/** 模型系列：已知四家按名字识别，其余取第一个连字符前的前缀（glm-5.3-flash → glm），目录里出现新家族时不需要改代码 */
 function modelFamily(id) {
-  return /^(claude|gpt|deepseek|kimi)-/i.exec(String(id))?.[1].toLowerCase() || 'other';
+  const name = String(id || '').toLowerCase();
+  const known = /^(claude|gpt|deepseek|kimi)-/.exec(name);
+  if (known) return known[1];
+  const prefix = /^([a-z][a-z0-9]{0,15})[-_.]/.exec(name);
+  return prefix ? prefix[1] : 'other';
 }
 
 function isModelAllowed(id, cfg) {
@@ -1603,6 +1618,48 @@ function newAccountCtx(key) {
   };
 }
 
+/** 每分钟一桶的请求历史（最近 120 分钟）——网页“请求趋势”用 */
+function bumpHistory(ctx, field, n = 1) {
+  const minute = Math.floor(Date.now() / 60000) * 60000;
+  if (!ctx.history) ctx.history = [];
+  let bucket = ctx.history[ctx.history.length - 1];
+  if (!bucket || bucket.t !== minute) {
+    bucket = { t: minute, ok: 0, err: 0, fallback: 0 };
+    ctx.history.push(bucket);
+    if (ctx.history.length > 120) ctx.history.splice(0, ctx.history.length - 120);
+  }
+  bucket[field] = (bucket[field] || 0) + n;
+}
+
+/** 按模型保留最近 40 个延迟样本（首字节 / 总耗时 / 成功与否），最多 200 个模型 */
+function recordLatency(ctx, model, sample) {
+  if (!model) return;
+  if (!ctx.latency) ctx.latency = new Map();
+  const key = String(model).slice(0, 160);
+  if (!ctx.latency.has(key)) { if (ctx.latency.size >= 200) return; ctx.latency.set(key, []); }
+  const list = ctx.latency.get(key);
+  list.push(sample);
+  if (list.length > 40) list.splice(0, list.length - 40);
+}
+function percentile(values, p) {
+  const s = values.filter(Number.isFinite).sort((a, b) => a - b);
+  return s.length ? s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))] : null;
+}
+function latencySummary(ctx) {
+  const out = {};
+  for (const [model, list] of ctx.latency || []) {
+    const ok = list.filter((x) => x.ok);
+    out[model] = {
+      count: list.length, ok: ok.length,
+      ttfb_p50_ms: percentile(ok.map((x) => x.ttfb), 0.5),
+      total_p50_ms: percentile(ok.map((x) => x.total), 0.5),
+      total_p95_ms: percentile(ok.map((x) => x.total), 0.95),
+      last_at: new Date(list[list.length - 1].at).toISOString(), last_ok: list[list.length - 1].ok,
+    };
+  }
+  return out;
+}
+
 function configRoot(cfg) {
   return path.dirname(path.resolve(cfg._config_path || path.join(__dirname, 'config.json')));
 }
@@ -1707,6 +1764,8 @@ function accountSummary(acct) {
     last_stream_error: ctx.lastStreamError || null,
     last_fallback: ctx.lastFallback || null,
     started_at: new Date(ctx.startedAt).toISOString(),
+    history: (ctx.history || []).slice(-60),
+    latency: latencySummary(ctx),
   };
 }
 
@@ -1949,6 +2008,7 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
       await handleProxy(req, res, acfg, actx, agent, replayLimit);
     } catch (err) {
       actx.counters.err++;
+      bumpHistory(actx, 'err');
       fail503(res, `forward failed: ${err.message}`);
     } finally {
       actx.inflight--;
@@ -2014,6 +2074,8 @@ function handleInternal(req, res, cfg, ctx) {
       counters: ctx.counters,
       account: ctx.key || 'main',
       hold: Boolean(ctx.hold),
+      history: (ctx.history || []).slice(-60),
+      latency: latencySummary(ctx),
       // 0.8.0：同一 bridge 托管的全部账号（含本账号），供网页后台与 status 命令使用
       accounts: ctx.hub ? ctx.hub.all().map(accountSummary) : undefined,
     }, null, 2);
@@ -2135,19 +2197,23 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   let kimiSlot = false;
   const abort = () => controller.abort();
   res.once('close', abort);
+  const startedAt = Date.now();
+  let ttfbMs = null, outcome = null, cleanBody = null;
+  const countOk = () => { ctx.counters.ok++; outcome = 'ok'; };
+  const countErr = () => { ctx.counters.err++; outcome = 'err'; };
   try {
   const target = resolveTarget(cfg, {
     preferPid: ctx.keepalive ? ctx.keepalive.pid : null,
     strict: Boolean(ctx.keepalive),
   });
   if (!target) {
-    ctx.counters.err++;
+    countErr();
     return fail503(res, 'no live agent session (keepalive down?)');
   }
 
   const { body, overflow } = await readBody(req, replayLimit);
   if (overflow) {
-    ctx.counters.err++;
+    countErr();
     return fail503(res, `request body exceeds replay_buffer_mb (${cfg.forward.replay_buffer_mb}MB)`);
   }
 
@@ -2177,7 +2243,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
 
   // --- /v1/messages：约束清洗（§1.2）+ CC 注入（§1.1），幂等 ---
   let outBody = body;
-  let cleanBody = null;      // 清洗后的请求对象；自愈重试时还要再改
+  cleanBody = null;          // 清洗后的请求对象；自愈重试时还要再改
   let hadSampling = false;
   let responsesStream = true;
   if (req.method === 'POST' && isResponses) {
@@ -2203,7 +2269,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
       if (!hasCC(parsed.system) && needsCCIdentity(parsed.model, cfg)) ctx.counters.injected++;
       const { body: cleaned, notes, error } = sanitizeMessagesRequest(parsed, cfg);
       if (error) {
-        ctx.counters.err++;
+        countErr();
         return fail400(res, error);
       }
       for (const n of notes) ctx.counters.sanitized[n] = (ctx.counters.sanitized[n] || 0) + 1;
@@ -2251,9 +2317,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   let upRes;
   try {
     upRes = await sendOnce(outBody);
+    ttfbMs = Date.now() - startedAt;
   } catch (err) {
     invalidateTarget();
-    ctx.counters.err++;
+    countErr();
     return fail503(res, `upstream error: ${err.code || err.message}`);
   }
 
@@ -2274,10 +2341,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     } else {
       if (/credit balance/i.test(firstError)) {
         ctx.backoffUntil = Math.max(ctx.backoffUntil, Date.now() + cfg.backoff.max_sec * 1000);
-        ctx.counters.err++;
+        countErr();
         return fail503(res, 'upstream credit unavailable');
       }
-      ctx.counters.err++;
+      countErr();
       const buf = Buffer.from(firstError);
       res.writeHead(400, mergedHeaders(upRes.headers, { 'content-length': buf.length }));
       return res.end(buf);
@@ -2292,7 +2359,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   // --- 上游 401/403 绝不透传（§2.4）：会把 sub2api 账号打成 error 态永久禁用 ---
   if (status === 401 || status === 403) {
     invalidateTarget();
-    ctx.counters.err++;
+    countErr();
     upRes.resume();
     warn(`上游 ${status} —— token 可能已失效，作废缓存并返回 503`);
     // 进程活着不等于凭证活着：通知保活器，连续达到阈值它会主动重启会话
@@ -2314,14 +2381,14 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     const text = await readStreamText(upRes);
     if (status === 400 && /credit balance/i.test(text)) {
       ctx.backoffUntil = Math.max(ctx.backoffUntil, Date.now() + cfg.backoff.max_sec * 1000);
-      ctx.counters.err++;
+      countErr();
       return fail503(res, 'upstream credit unavailable');
     }
     logFailure(cfg, {
       status, ua: req.headers['user-agent'] ?? null,
       sent: truncLog(cleanBody ?? '(非JSON,未解析)'), upstream: truncLog(text),
     });
-    ctx.counters.err++;
+    countErr();
     const buf = Buffer.from(text, 'utf8');
     res.writeHead(status, mergedHeaders(upRes.headers, { 'content-length': buf.length }));
     res.end(buf);
@@ -2345,14 +2412,14 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
         if (!Array.isArray(catalog)) delete catalog.models;
         const out = Buffer.from(JSON.stringify(catalog), 'utf8');
         if (target.relay) target.relay.ready = kept.length > 0;
-        ctx.counters.ok++;
+        countOk();
         res.writeHead(200, mergedHeaders(upRes.headers, {
           'content-type': 'application/json; charset=utf-8', 'content-length': out.length,
         }));
         res.end(out);
     } catch {
       if (target.relay) target.relay.ready = false;
-      ctx.counters.err++;
+      countErr();
       return fail503(res, 'invalid upstream model catalog');
     }
     return;
@@ -2361,11 +2428,11 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   if (status === 200 && wirePath === '/v1/responses' && !responsesStream) {
     const response = aggregateResponses(await readStreamText(upRes));
     if (noteServedModel(ctx, cfg, cleanBody?.model, response.model)) {
-      ctx.counters.err++;
+      countErr();
       return fail503(res, 'upstream_stream_model_fallback');
     }
     const out = Buffer.from(JSON.stringify(response));
-    ctx.counters.ok++;
+    countOk();
     res.writeHead(200, mergedHeaders(upRes.headers, { 'content-type': 'application/json', 'content-length': out.length }));
     return res.end(out);
   }
@@ -2391,10 +2458,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
         firstEventTimeoutMs: cfg.forward.upstream_headers_timeout_ms,
         onServed: (served) => noteServedModel(ctx, cfg, cleanBody?.model, served),
       });
-      if (ok) ctx.counters.ok++;
-      else { ctx.counters.err++; record('upstream_stream_error'); }
+      if (ok) countOk();
+      else { countErr(); record('upstream_stream_error'); }
     } catch (err) {
-      ctx.counters.err++;
+      countErr();
       if (!res.destroyed) {
         const code = /^upstream_stream_[a-z_]+$/.test(err.code || '') ? err.code : 'upstream_stream_interrupted';
         record(code);
@@ -2412,7 +2479,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     const finish = (complete) => {
       if (finished) return;
       finished = true;
-      if (complete && status >= 200 && status < 400) ctx.counters.ok++; else ctx.counters.err++;
+      if (complete && status >= 200 && status < 400) countOk(); else countErr();
       if (!complete) res.destroy();
       done();
     };
@@ -2426,6 +2493,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     if (kimiSlot) ctx.kimiInflight--;
     res.removeListener('close', abort);
     controller.abort();
+    if (outcome) {
+      bumpHistory(ctx, outcome);
+      if (cleanBody?.model) recordLatency(ctx, cleanBody.model, { at: Date.now(), ok: outcome === 'ok', ttfb: ttfbMs, total: Date.now() - startedAt });
+    }
   }
 }
 
@@ -3879,7 +3950,7 @@ async function main() {
 }
 
 if (require.main === module) main().catch((err) => fatal(err && err.stack ? err.stack : String(err)));
-module.exports = { bridgeBaseUrl, AccountHub, newAccountCtx, accountSummary, loadHostedAccount, configRoot, registerHubAccount, accountHealthTick, managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
+module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridgeBaseUrl, AccountHub, newAccountCtx, accountSummary, loadHostedAccount, configRoot, registerHubAccount, accountHealthTick, managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
   modelFamily, isModelAllowed, summarizeModelResponse, diagnosticTarget, diagnosticRequest,

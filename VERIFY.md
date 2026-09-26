@@ -56,6 +56,25 @@ Mirasim 定价页的“Verify it yourself”列出四项检测：并排对比、
 
 bridge 计数：`injected=2`（只给两个 Claude 请求注入身份块，Kimi 未注入）、`fallback=0`、`models_filtered=3`（fable ×2、glm ×1 未进入目录）、错误密钥返回 503。Kimi 在 `max_tokens` 很小（120）时会把推理直接写进正文并以 `max_tokens` 结束，给它足够预算（≥300）后推理回到 `thinking_delta`，这是上游行为。
 
+## 配对复核：直连 vs 经 bridge（0.8.1，2026-09-26）
+
+方法：同一个本机 Mirasim 会话，同一请求分别直接发给会话端点和发给 bridge（session 后端 + 保活会话，`x-api-key` 鉴权）。直连请求手动加上 bridge 会加的东西（Claude 的身份提示词、Kimi 的 low 推理档），其余完全一致。比较响应的 HTTP 状态、`message_start.message.model`、消息 id 前缀、`usage` 字段集合、`message` 字段集合、SSE 事件类型序列和 stop_reason；再经 bridge 做 6 道确定性题（17×23、反转 bridge、三段论、strawberry 的 r、水的化学式、Python 平方和表达式）。
+
+| 模型 | 直连 / 经 bridge 自称 | 7 项指纹字段 | 经 bridge 推理题 |
+|---|---|---|---|
+| claude-haiku-4-5 | Anthropic / Anthropic | 全部一致（served 均为 claude-haiku-4-5-20251001） | 6/6 |
+| claude-sonnet-5 | Anthropic / Anthropic | 全部一致 | 6/6 |
+| claude-opus-4-8 | Anthropic / Anthropic | 全部一致 | 6/6 |
+| kimi-k3 | Moonshot AI / Moonshot AI | 全部一致（推理以 thinking_delta 返回） | 6/6 |
+| glm-5.3-flash | Z.ai / Z.ai | 全部一致 | 6/6 |
+| gpt-6-astra | 503 / 503 | 一致（上游无容量） | — |
+| deepseek-v4-flash | 503 / 503 | 一致（上游无容量） | — |
+
+- bridge 计数（最终版代码复跑）：41 次请求，`injected=21`（只有 Claude 请求被注入身份块），`fallback=0`，`sampling_retried=0`，`cc_retried=0`。
+- 措辞差异（如 sonnet 一次说 “made by Anthropic”、一次说 “developed by Anthropic”）来自采样随机性：relay 不接受 temperature 等采样参数，直连也无法固定。
+- bridge 在请求侧做的全部改写：Claude 注入身份块（上游强制）；剥离上游拒绝的采样参数、`cache_control.scope`、顶层 null 字段、空文本块；合并连续 assistant 消息；过滤纯空白 stop_sequences；补默认 max_tokens；Kimi 在客户端未指定 thinking/output_config 时补默认推理档（可在网页设为“不干预”）。响应侧逐字节透传，只增删传输相关头（去掉 content-length，加 x-bridge-request-id、x-accel-buffering）。
+- 目录新增 `claude-opus-5-5`、`glm-5.3-flash`；0.8.1 起目录不再按写死的系列过滤，GLM 已经验证可用并自动进入 sub2 映射。GPT/DeepSeek 本机仍无容量，需在服务器复测。
+
 ## 逐轮查看路由（模型替换）
 
 Mirasim 在额度不足时可能用别的模型顶替本轮，并在响应的 `model` 字段报告实际模型。桌面客户端据此记录 `modelRoute = {requested, served}`，并提供“被替换时中断本轮”选项。

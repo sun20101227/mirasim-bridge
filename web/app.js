@@ -1,13 +1,15 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 const host = document.body.dataset.mode === 'host';
-let key = '', loginSession = null, timer = null, polling = false, noticeTimer = null;
+let key = '', loginSession = null, timer = null, polling = false, noticeTimer = null, view = 'overview';
 let selected = { target: 'main', account: 'main' };
-let fleetRows = [], bridgeVersion = null, modelRows = [], groupsCache = null;
-const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', release: '版本与升级' };
-const FAMILIES = ['claude', 'gpt', 'deepseek', 'kimi'];
-const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi' };
-const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '并发设置', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
+let fleetRows = [], bridgeVersion = null, modelRows = [], modelsFor = '', groupsCache = null;
+const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', logs: '运行日志', release: '版本与升级' };
+const KNOWN = ['claude', 'gpt', 'deepseek', 'kimi'];
+const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi', glm: 'GLM', other: '其他' };
+const familyName = (f) => FAMILY_NAMES[f] || (f ? f.charAt(0).toUpperCase() + f.slice(1) : '其他');
+const familyOrder = (f) => (KNOWN.includes(f) ? KNOWN.indexOf(f) : 10);
+const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '运行设置', codex: 'Codex 账号', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
 const SCHED = { on: ['已入池', 'ok'], off: ['已暂停', 'warn'], unmanaged: ['未接管', ''], unknown: ['等待确认', 'warn'] };
 async function groups() { if (!groupsCache) groupsCache = await api('groups', {}, 'main'); return groupsCache; }
 function fillGroups(select, platforms, current, placeholder) {
@@ -28,9 +30,10 @@ function pill(text, tone) { return node('span', text, 'pill' + (tone ? ' ' + ton
 function empty(text) { return node('p', text, 'empty'); }
 function relative(ms) {
   const diff = ms - Date.now(), abs = Math.abs(diff), future = diff > 0;
-  const [n, unit] = abs < 3600e3 ? [Math.max(1, Math.round(abs / 60e3)), '分钟'] : abs < 86400e3 ? [Math.round(abs / 3600e3), '小时'] : [Math.round(abs / 86400e3), '天'];
+  const [n, unit] = abs < 60e3 ? [Math.max(1, Math.round(abs / 1e3)), '秒'] : abs < 3600e3 ? [Math.round(abs / 60e3), '分钟'] : abs < 86400e3 ? [Math.round(abs / 3600e3), '小时'] : [Math.round(abs / 86400e3), '天'];
   return future ? `${n} ${unit}后` : `${n} ${unit}前`;
 }
+const ms = (v) => (v == null ? '—' : v >= 10000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`);
 function versionNewer(a, b) {
   const pa = String(a || '').split('.').map(Number), pb = String(b || '').split('.').map(Number);
   for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
@@ -43,7 +46,7 @@ async function api(operation, data = {}, target = selected.target) {
     body: JSON.stringify(host ? { operation, target, data } : data), signal: AbortSignal.timeout(operation === 'stop' ? 230000 : 60000) });
   const result = await response.json(); if (!response.ok) throw Error(result.error || `HTTP ${response.status}`); return result;
 }
-const scoped = (data = {}) => ({ account: selected.account, ...data });   // account-scoped call on the selected account
+const scoped = (data = {}) => ({ account: selected.account, ...data });
 function guarded(fn) {
   return async (event) => {
     event?.preventDefault();
@@ -68,7 +71,7 @@ function quotaMini(quota) {
   return box;
 }
 
-/** Every Mira account across every target: hosted accounts (0.8.0) plus separate containers. */
+/** Every Mira account across every target: hosted accounts plus separate containers. */
 async function fleet() {
   const targets = host ? await api('targets') : [{ name: 'main' }];
   const rows = (await Promise.all(targets.map(async (t) => {
@@ -94,6 +97,7 @@ async function fleet() {
     else {
       const [text, tone] = SCHED[a.sub2api?.schedulable] || SCHED.unknown; state.append(pill(a.hold ? '手动暂停' : text, a.hold ? 'warn' : tone));
       if (a.sub2api?.managed && !a.sub2api.reachable) state.append(pill('反向未通', 'warn'));
+      if (a.relay && a.relay.ready === false) state.append(pill('上游未就绪', 'bad'));
       if (a.sub2api_codex?.managed) state.append(pill(`Codex ${SCHED[a.sub2api_codex.schedulable]?.[0] || '等待'}`, a.sub2api_codex.schedulable === 'on' ? 'info' : ''));
     }
     const load = node('div', '', 'fleet-load'); const c = a.counters || {};
@@ -104,27 +108,60 @@ async function fleet() {
   }
 }
 
+function renderTrend(history) {
+  const box = $('trend'); box.replaceChildren();
+  const now = Math.floor(Date.now() / 60000) * 60000, byMinute = new Map((history || []).map((h) => [h.t, h]));
+  const minutes = Array.from({ length: 60 }, (_, i) => now - (59 - i) * 60000).map((t) => byMinute.get(t) || { t, ok: 0, err: 0, fallback: 0 });
+  const max = Math.max(1, ...minutes.map((m) => (m.ok || 0) + (m.err || 0)));
+  let total = 0, okTotal = 0;
+  for (const m of minutes) {
+    const ok = m.ok || 0, err = m.err || 0, fb = m.fallback || 0; total += ok + err; okTotal += ok;
+    const bar = node('div', '', 'bar'); bar.title = `${new Date(m.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · 成功 ${ok} · 失败 ${err}${fb ? ` · 被替换 ${fb}` : ''}`;
+    const okEl = node('i', '', 'ok'), errEl = node('i', '', 'bad'), fbEl = node('i', '', 'warn');
+    okEl.style.height = `${(ok / max) * 100}%`; errEl.style.height = `${(err / max) * 100}%`; fbEl.style.height = fb ? '3px' : '0';
+    bar.append(errEl, okEl, fbEl); box.append(bar);
+  }
+  $('trend-summary').textContent = total ? `60 分钟 ${total.toLocaleString()} 次 · 成功率 ${Math.round((okTotal / total) * 100)}%` : '最近 60 分钟没有请求';
+}
+function renderLatency(latency) {
+  const box = $('latency'); box.replaceChildren();
+  const rows = Object.entries(latency || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 12);
+  if (!rows.length) { box.append(empty('还没有请求样本')); return; }
+  for (const [model, l] of rows) {
+    const row = node('div', '', 'lat-row'), name = node('div', '', 'lat-name');
+    name.append(node('b', model), node('span', `${l.count} 次 · 成功 ${l.count ? Math.round((l.ok / l.count) * 100) : 0}% · ${l.last_at ? relative(Date.parse(l.last_at)) : ''}`, 'hint'));
+    const nums = node('div', '', 'lat-nums');
+    for (const [k, v] of [['首字节', l.ttfb_p50_ms], ['中位', l.total_p50_ms], ['P95', l.total_p95_ms]]) { const m = node('div'); m.append(node('label', k), node('b', ms(v))); if (k === 'P95' && v > 30000) m.dataset.tone = 'warn'; nums.append(m); }
+    if (l.last_ok === false) name.append(pill('最近一次失败', 'bad'));
+    row.append(name, nums); box.append(row);
+  }
+}
+
 async function overview() {
   const s = await api('summary', scoped()), runtime = await api('status', scoped());
   const sub = runtime.sub2api || {};
   bridgeVersion = runtime.version || null;
   stat('stat-version', runtime.version || '未知');
-  $('current-version').textContent = runtime.version || '—';
+  $('current-version').textContent = runtime.version || '—'; $('aside-version').textContent = runtime.version ? `bridge ${runtime.version}` : '';
   const scheduling = sub.schedulable || runtime.schedulable;
   const sched = runtime.hold ? ['手动暂停', 'warn'] : SCHED[scheduling] || SCHED.unknown;
   stat('stat-schedule', sched[0], sched[1]);
   $('reach').textContent = (sub.reachable ?? runtime.reachable) ? 'sub2 → bridge 可达' : '反向连接待确认';
   stat('stat-inflight', String(runtime.inflight ?? '—'));
   $('stat-inflight').querySelector('span').textContent = runtime.kimi_inflight ? `其中 Kimi ${runtime.kimi_inflight} 个` : `上限 ${s.max_concurrency ?? '—'}`;
-  const up = runtime.uptime_sec;
-  stat('stat-uptime', Number.isFinite(up) ? (up >= 86400 ? `${Math.floor(up / 86400)}天 ${Math.floor(up % 86400 / 3600)}时` : `${Math.floor(up / 3600)}h ${Math.floor(up % 3600 / 60)}m`) : '—');
+  const me = (runtime.accounts || []).find((a) => a.key === selected.account) || {};
+  const okAt = runtime.last_upstream_ok_at ? Date.parse(runtime.last_upstream_ok_at) : null;
+  stat('stat-upstream', okAt ? relative(okAt) : '尚无', okAt && Date.now() - okAt < 3600e3 ? 'ok' : okAt ? 'warn' : '');
+  $('upstream-sub').textContent = me.relay ? (me.relay.ready ? 'relay 就绪' : 'relay 未就绪') : runtime.backoff_sec_left ? `退避中 ${runtime.backoff_sec_left}s` : `运行 ${Number.isFinite(runtime.uptime_sec) ? (runtime.uptime_sec >= 86400 ? `${Math.floor(runtime.uptime_sec / 86400)} 天` : `${Math.floor(runtime.uptime_sec / 3600)} 小时`) : '—'}`;
+  if (runtime.backoff_sec_left) $('upstream-sub').textContent = `上游限流退避中 ${runtime.backoff_sec_left}s`;
 
   const codex = runtime.sub2api_codex || {};
-  const codexText = codex.managed ? `${SCHED[codex.schedulable]?.[0] || '等待确认'}${codex.reachable ? '' : ' · 反向连接待确认'}` : '未启用（见 CODEX.md）';
+  const codexText = codex.managed ? `${SCHED[codex.schedulable]?.[0] || '等待确认'}${codex.reachable ? '' : ' · 反向连接待确认'}` : '未启用';
   const kind = selected.account !== 'main' ? '托管账号（与主账号同一地址，按密钥区分）' : runtime.hosting ? '主账号（本 bridge）' : '独立 bridge';
-  const info = { '当前账号': label({ target: selected.target, account: selected.account }), '类型': kind, 'sub2 账号名': s.account_name, '配置分组': (s.group_ids || []).join(', ') || '未设置', '上游地址': s.public_base_url || '（本机端口）', '并发上限': `总 ${s.max_concurrency ?? '—'} · Kimi ${s.kimi_max_concurrency ?? '—'}`, 'Codex 账号': codexText, '模型被替换时': s.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录' };
+  const up = runtime.uptime_sec;
+  const info = { '当前账号': label(selected), '类型': kind, 'sub2 账号名': s.account_name, '配置分组': (s.group_ids || []).join(', ') || '未设置', '上游地址': s.public_base_url || '（本机端口）', '并发上限': `总 ${s.max_concurrency ?? '—'} · Kimi ${s.kimi_max_concurrency ?? '—'}`, 'Kimi 推理档': s.kimi_default_effort === undefined ? '—' : (s.kimi_default_effort || '不干预'), 'Codex 账号': codexText, '模型被替换时': s.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录', '进程运行时间': Number.isFinite(up) ? (up >= 86400 ? `${Math.floor(up / 86400)} 天 ${Math.floor(up % 86400 / 3600)} 小时` : `${Math.floor(up / 3600)} 小时 ${Math.floor(up % 3600 / 60)} 分`) : '—' };
   for (const id of ['connection', 'account-info']) { $(id).replaceChildren(); for (const [k, v] of Object.entries(info)) $(id).append(node('dt', k), node('dd', v)); }
-  $('selected-title').textContent = label({ target: selected.target, account: selected.account });
+  $('selected-title').textContent = label(selected);
   $('selected-sub').textContent = `${sched[0]} · sub2 账号 ${s.account_name || '—'}`;
   const container = selected.account === 'main' && host;
   $('start-account').hidden = !container; $('stop-account').hidden = !container;
@@ -133,9 +170,11 @@ async function overview() {
     if (s.max_concurrency) $('max-concurrency').value = s.max_concurrency;
     if (s.kimi_max_concurrency) $('kimi-concurrency').value = s.kimi_max_concurrency;
     if (s.model_fallback) $('model-fallback').value = s.model_fallback;
+    if (s.kimi_default_effort !== undefined) $('kimi-effort').value = s.kimi_default_effort;
   }
   await codexCard();
 
+  renderTrend(runtime.history); renderLatency(runtime.latency);
   const quota = runtime.quota || {};
   $('quota').replaceChildren();
   $('quota-time').textContent = quota.observed_at ? `采样于 ${relative(Date.parse(quota.observed_at) || quota.observed_at)}${quota.stale ? ' · 已过期' : ''}` : '等待首次采样';
@@ -171,7 +210,7 @@ async function overview() {
 
 async function codexCard() {
   let cx;
-  try { cx = await api('codex', scoped()); } catch { $('codex-card').hidden = true; return; }   // older bridge without the op
+  try { cx = await api('codex', scoped()); } catch { $('codex-card').hidden = true; return; }
   $('codex-card').hidden = false;
   const st = cx.sub2api_codex || {};
   const pillEl = $('codex-state'); pillEl.hidden = false;
@@ -202,7 +241,7 @@ async function profiles() {
     } else if (p.configured && !managedContainer) {
       if (hostingSupported) {
         const b = node('button', '托管到当前 bridge', 'secondary small');
-        b.addEventListener('click', guarded(async () => { const r = await api('account/host', { profile: p.profile }, 'main'); notice(r.registered ? `已托管并注册 sub2 账号 ${r.account_name}${r.reachable ? '' : '（反向连接待确认）'}` : `已托管，sub2 注册将在健康检查中完成`); await refresh(); }));
+        b.addEventListener('click', guarded(async () => { const r = await api('account/host', { profile: p.profile }, 'main'); notice(r.registered ? `已托管并注册 sub2 账号 ${r.account_name}${r.reachable ? '' : '（反向连接待确认）'}` : '已托管，sub2 注册将在健康检查中完成'); await refresh(); }));
         actions.append(b);
       }
       if (host) {
@@ -217,29 +256,35 @@ async function profiles() {
 
 function renderFamilies() {
   $('families').replaceChildren();
-  for (const family of FAMILIES) {
-    const rows = modelRows.filter((m) => m.family === family || m.id.startsWith(family + '-'));
-    if (!rows.length) continue;
+  const families = [...new Set(modelRows.map((m) => m.family))].sort((a, b) => familyOrder(a) - familyOrder(b) || a.localeCompare(b));
+  for (const family of families) {
+    const rows = modelRows.filter((m) => m.family === family);
     const on = rows.filter((m) => m.enabled).length, box = node('div', '', 'family'), text = node('div');
-    text.append(node('b', FAMILY_NAMES[family]), node('span', `已启用 ${on} / ${rows.length}`));
+    text.append(node('b', familyName(family)), node('span', `已启用 ${on} / ${rows.length}`));
     const enable = on < rows.length, button = node('button', enable ? '全部启用' : '全部停用', enable ? 'secondary small' : 'danger small');
     button.addEventListener('click', guarded(async () => {
-      if (!confirm(`${enable ? '启用' : '停用'} ${FAMILY_NAMES[family]} 系列的全部模型？`)) return;
-      const r = await api('models/family', scoped({ family, enabled: enable })); notice(`已${enable ? '启用' : '停用'} ${r.changed} 个 ${FAMILY_NAMES[family]} 模型，sub2 映射将在下一次健康检查同步。`); await models();
+      if (!confirm(`${enable ? '启用' : '停用'} ${familyName(family)} 系列的全部模型？`)) return;
+      const r = await api('models/family', scoped({ family, enabled: enable })); notice(`已${enable ? '启用' : '停用'} ${r.changed} 个 ${familyName(family)} 模型，sub2 映射将在下一次健康检查同步。`); await models();
     }));
     box.append(text, button); $('families').append(box);
   }
   $('family-card').hidden = !$('families').children.length;
 }
 async function models() {
-  modelRows = await api('models', scoped()); $('models').replaceChildren();
-  modelRows.sort((a, b) => FAMILIES.indexOf(a.family) - FAMILIES.indexOf(b.family) || a.id.localeCompare(b.id));
-  if (!modelRows.length) { const tr = document.createElement('tr'), td = node('td'); td.colSpan = 5; td.append(empty('上游目录为空')); tr.append(td); $('models').append(tr); }
+  const wanted = `${selected.target}|${selected.account}`;
+  $('models').replaceChildren((() => { const tr = document.createElement('tr'), td = node('td'); td.colSpan = 6; td.append(empty('正在读取上游目录…')); tr.append(td); return tr; })());
+  modelRows = await api('models', scoped()); modelsFor = wanted; $('models').replaceChildren();
+  modelRows.sort((a, b) => familyOrder(a.family) - familyOrder(b.family) || a.family.localeCompare(b.family) || a.id.localeCompare(b.id));
+  if (!modelRows.length) { const tr = document.createElement('tr'), td = node('td'); td.colSpan = 6; td.append(empty('上游目录为空')); tr.append(td); $('models').append(tr); }
   for (const m of modelRows) {
     const tr = document.createElement('tr'); if (!m.enabled) tr.className = 'off';
     tr.append(node('td', m.id, 'model-id'));
-    const fam = node('td'); fam.append(node('span', FAMILY_NAMES[m.family] || m.family, 'chip')); tr.append(fam);
-    const st = node('td'); st.append(m.enabled ? pill('已启用', 'ok') : pill('已停用')); tr.append(st);
+    const fam = node('td'); fam.append(node('span', familyName(m.family), 'chip')); tr.append(fam);
+    const st = node('td'); st.append(m.enabled ? pill('已启用', 'ok') : m.blocked ? pill('已屏蔽', 'bad') : m.filtered ? pill('未放行', '') : pill('已停用')); tr.append(st);
+    const lat = node('td', '', 'lat-cell');
+    if (m.latency) { lat.append(node('b', ms(m.latency.total_p50_ms)), node('span', ` · 首字节 ${ms(m.latency.ttfb_p50_ms)} · ${m.latency.count} 次`, 'hint')); if (m.latency.last_ok === false) lat.append(pill('最近失败', 'bad')); }
+    else lat.append(node('span', '尚无样本', 'hint'));
+    tr.append(lat);
     tr.append(node('td', m.note, 'note'));
     const actions = node('td', '', 'actions');
     if (m.enabled) {
@@ -247,13 +292,25 @@ async function models() {
       test.addEventListener('click', guarded(async () => { if (!confirm(`测试 ${m.id} 会发送真实请求、消耗额度，是否继续？`)) return; const result = await api('test', scoped({ id: m.id })); notice(`${result.model}：${result.message} · HTTP ${result.status} · ${result.elapsed_ms ?? '?'} ms`, !result.ok); }));
       actions.append(test);
     }
-    const toggle = node('button', m.enabled ? '停用' : '启用', m.enabled ? 'quiet small' : 'secondary small');
-    toggle.addEventListener('click', guarded(async () => { await api('model', scoped({ id: m.id, enabled: !m.enabled })); notice('配置已保存，sub2 模型映射会在下一次健康检查同步。'); await models(); }));
-    actions.append(toggle); tr.append(actions); $('models').append(tr);
+    if (!m.blocked && !m.filtered) {
+      const toggle = node('button', m.enabled ? '停用' : '启用', m.enabled ? 'quiet small' : 'secondary small');
+      toggle.addEventListener('click', guarded(async () => { await api('model', scoped({ id: m.id, enabled: !m.enabled })); notice('配置已保存，sub2 模型映射会在下一次健康检查同步。'); await models(); }));
+      actions.append(toggle);
+    }
+    tr.append(actions); $('models').append(tr);
   }
   const on = modelRows.filter((m) => m.enabled).length;
-  $('model-summary').replaceChildren(pill(`已启用 ${on}`, 'ok'), pill(`共 ${modelRows.length}`));
+  $('model-summary').replaceChildren(pill(`已启用 ${on}`, 'ok'), pill(`共 ${modelRows.length}`), pill(`${new Set(modelRows.map((m) => m.family)).size} 个系列`, 'info'));
   renderFamilies();
+}
+
+async function logs() {
+  const r = await api('logs', { limit: 400 });
+  const filter = $('log-filter').value.trim().toLowerCase();
+  const lines = (r.lines || []).filter((l) => !filter || l.toLowerCase().includes(filter));
+  const pre = $('logs'), atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  pre.textContent = lines.length ? lines.join('\n') : (filter ? '没有匹配的日志行' : '暂无日志');
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
 const phases = { idle: ['等待操作', ''], checking: ['检查发布', 'info'], pulling: ['拉取并验证镜像', 'info'], activating: ['重建容器并验证调度', 'info'], succeeded: ['升级成功', 'ok'], failed: ['准备失败，运行中的容器未改变', 'bad'], rolling_back: ['正在回退', 'warn'], rolled_back: ['已回退', 'warn'], rollback_failed: ['回退未完成，需要排查', 'bad'] };
@@ -281,14 +338,19 @@ async function checkRelease() {
   $('update-pill').className = 'pill ' + (newer ? 'info' : 'ok');
   $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : '已是最新版本';
 }
-async function refresh() { groupsCache = null; await fleet(); await overview(); await profiles(); await deployment(); }
-
-for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => {
-  const view = button.dataset.view; $('page-title').textContent = titles[view];
-  for (const el of document.querySelectorAll('[data-section]')) el.hidden = el.dataset.section !== view;
-  for (const el of document.querySelectorAll('[data-view]')) el.classList.toggle('selected', el === button);
-  if (view === 'release' && host && $('latest-version').textContent === '—') checkRelease().catch(() => {});
-});
+async function refresh() {
+  groupsCache = null; await fleet(); await overview(); await profiles(); await deployment();
+  if (view === 'models') await models(); if (view === 'logs') await logs();
+}
+async function showView(next) {
+  view = next; $('page-title').textContent = titles[next];
+  for (const el of document.querySelectorAll('[data-section]')) el.hidden = el.dataset.section !== next;
+  for (const el of document.querySelectorAll('[data-view]')) el.classList.toggle('selected', el.dataset.view === next);
+  if (next === 'release' && host && $('latest-version').textContent === '—') checkRelease().catch(() => {});
+  if (next === 'models' && key && modelsFor !== `${selected.target}|${selected.account}`) models().catch((e) => notice(e.message, true));
+  if (next === 'logs' && key) logs().catch((e) => notice(e.message, true));
+}
+for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => showView(button.dataset.view));
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
 $('login-form').addEventListener('submit', guarded(async () => {
   key = $('key').value.trim(); if (!/^[a-f0-9]{64}$/.test(key)) throw Error('请输入有效的 64 位管理密钥');
@@ -296,26 +358,27 @@ $('login-form').addEventListener('submit', guarded(async () => {
   $('key').value = ''; $('login-box').hidden = true; $('workspace').hidden = false; notice('已连接后台');
   await refresh();
   clearInterval(timer);
-  timer = setInterval(async () => { if (!key || polling || document.hidden) return; polling = true; try { await fleet(); await overview(); await deployment(); } catch {} finally { polling = false; } }, 15000);
+  timer = setInterval(async () => { if (!key || polling || document.hidden) return; polling = true; try { await fleet(); await overview(); await deployment(); if (view === 'logs') await logs(); } catch {} finally { polling = false; } }, 15000);
 }));
 $('logout').addEventListener('click', () => { key = ''; clearInterval(timer); location.reload(); });
-$('refresh').addEventListener('click', guarded(refresh)); $('load-models').addEventListener('click', guarded(models));
+$('refresh').addEventListener('click', guarded(refresh)); $('load-models').addEventListener('click', guarded(models)); $('load-logs').addEventListener('click', guarded(logs));
+$('log-filter').addEventListener('input', () => { logs().catch(() => {}); });
 $('check-release').addEventListener('click', guarded(checkRelease));
 $('settings-form').addEventListener('submit', guarded(async () => {
-  const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value });
-  const r = await api('settings', data); notice(`${label(selected)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
-}));
-$('target').addEventListener('change', guarded(async () => {
-  const [target, account] = $('target').value.split('|'); selected = { target, account };
-  modelRows = []; $('models').replaceChildren(); $('family-card').hidden = true; $('model-summary').replaceChildren();
-  await refresh(); notice(`已选择 ${label(selected)}，模型目录请重新加载。`);
+  const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value, kimi_default_effort: $('kimi-effort').value });
+  const r = await api('settings', data); notice(`${label(selected)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
 }));
 $('codex-form').addEventListener('submit', guarded(async () => {
   const enabled = $('codex-enabled').checked, group_id = Number($('codex-group').value) || undefined;
   if (enabled && !group_id) throw Error('请选择一个 openai 或 composite 平台分组');
   const r = await api('codex', scoped({ enabled, group_id, account_name: $('codex-name').value.trim() }));
-  notice(enabled ? (r.registered ? `Codex 账号 ${r.account_name} 已注册，进入调度后即可在 Codex 里使用。` : `已保存，Codex 账号将在健康检查中注册。`) : 'Codex 账号已关闭并暂停。');
+  notice(enabled ? (r.registered ? `Codex 账号 ${r.account_name} 已注册，进入调度后即可在 Codex 里使用。` : '已保存，Codex 账号将在健康检查中注册。') : 'Codex 账号已关闭并暂停。');
   await overview();
+}));
+$('target').addEventListener('change', guarded(async () => {
+  const [target, account] = $('target').value.split('|'); selected = { target, account };
+  modelRows = []; modelsFor = ''; $('models').replaceChildren(); $('family-card').hidden = true; $('model-summary').replaceChildren();
+  await refresh(); notice(`已选择 ${label(selected)}。`);
 }));
 $('pause-account').addEventListener('click', guarded(async () => { if (!confirm(`暂停 ${label(selected)} 的调度？它会立即从 sub2 池子里摘出，直到手动恢复。`)) return; const r = await api('account/pause', scoped()); notice(r.paused ? '已暂停调度' : (r.managed ? '暂停请求未完全成功，请到 sub2 后台确认' : '该账号未接入 sub2，已标记为保持暂停'), !r.paused && r.managed); await refresh(); }));
 $('resume-account').addEventListener('click', guarded(async () => { const r = await api('account/resume', scoped()); notice(r.note || '已恢复'); await refresh(); }));

@@ -1,22 +1,22 @@
 :root{
-  --bg:#f3f6f5;--surface:#fff;--surface-2:#f7faf8;--text:#1f2f29;--muted:#64776f;--faint:#8b9a93;--line:#e2e9e5;--line-strong:#cfdcd4;
-  --accent:#126957;--accent-hover:#0e5647;--accent-soft:#e3f1eb;--on-accent:#fff;
-  --side:#102d26;--side-text:#b3cfc2;--side-active:#23473b;--side-strong:#f3fbf7;
+  --bg:#f4f4fa;--surface:#fff;--surface-2:#f7f7fc;--text:#1f1e3a;--muted:#66647f;--faint:#8f8da8;--line:#e5e4f0;--line-strong:#d2d0e4;
+  --accent:#4f46c9;--accent-hover:#3f38ad;--accent-soft:#ecebfb;--on-accent:#fff;
+  --side:#12102a;--side-text:#b6b3d6;--side-active:#24214a;--side-strong:#f4f3ff;
   --ok:#1d7a4f;--ok-soft:#e4f4ea;--warn:#9a6300;--warn-soft:#fdf2dc;--bad:#b23b2e;--bad-soft:#fdecea;--info:#2d5f9a;--info-soft:#e7eef8;
-  --shadow:0 1px 2px #0f2a1f0a,0 4px 16px #0f2a1f08;--radius:12px;
+  --shadow:0 1px 2px #1a184010,0 4px 16px #1a184008;--radius:12px;
   color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#0d1714;--surface:#14211d;--surface-2:#182824;--text:#e2ede8;--muted:#9fb3aa;--faint:#7b8f86;--line:#243732;--line-strong:#2f4640;
-  --accent:#3fae8c;--accent-hover:#52c29f;--accent-soft:#1c3a31;--on-accent:#06140f;
-  --side:#0a1310;--side-text:#9ab7aa;--side-active:#1b322b;--side-strong:#eef8f3;
+  --bg:#0f0e22;--surface:#171631;--surface-2:#1c1b3a;--text:#e6e5f4;--muted:#a6a4c6;--faint:#7f7da0;--line:#282649;--line-strong:#363460;
+  --accent:#8b80f5;--accent-hover:#a198f8;--accent-soft:#26235a;--on-accent:#0b0a1f;
+  --side:#0b0a1f;--side-text:#9f9cc4;--side-active:#1d1b44;--side-strong:#f1f0ff;
   --ok:#5cc98f;--ok-soft:#173327;--warn:#e3b04e;--warn-soft:#352a12;--bad:#f07f71;--bad-soft:#3a1c18;--info:#7fb0ea;--info-soft:#172a40;
   --shadow:0 1px 2px #0006;color-scheme:dark;
 }}
 :root[data-theme="dark"]{
-  --bg:#0d1714;--surface:#14211d;--surface-2:#182824;--text:#e2ede8;--muted:#9fb3aa;--faint:#7b8f86;--line:#243732;--line-strong:#2f4640;
-  --accent:#3fae8c;--accent-hover:#52c29f;--accent-soft:#1c3a31;--on-accent:#06140f;
-  --side:#0a1310;--side-text:#9ab7aa;--side-active:#1b322b;--side-strong:#eef8f3;
+  --bg:#0f0e22;--surface:#171631;--surface-2:#1c1b3a;--text:#e6e5f4;--muted:#a6a4c6;--faint:#7f7da0;--line:#282649;--line-strong:#363460;
+  --accent:#8b80f5;--accent-hover:#a198f8;--accent-soft:#26235a;--on-accent:#0b0a1f;
+  --side:#0b0a1f;--side-text:#9f9cc4;--side-active:#1d1b44;--side-strong:#f1f0ff;
   --ok:#5cc98f;--ok-soft:#173327;--warn:#e3b04e;--warn-soft:#352a12;--bad:#f07f71;--bad-soft:#3a1c18;--info:#7fb0ea;--info-soft:#172a40;
   --shadow:0 1px 2px #0006;color-scheme:dark;
 }
@@ -47,15 +47,15 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 /* Sidebar */
 aside{width:228px;position:fixed;inset:0 auto 0 0;background:var(--side);color:var(--side-text);padding:30px 18px 22px;display:flex;flex-direction:column;z-index:2}
 .brand{font-size:22px;font-weight:650;color:var(--side-strong);display:flex;gap:12px;align-items:center;line-height:1.15;padding:0 6px}
-.logo{background:#d4eee2;color:#174d3c;font-size:26px;width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-weight:800;flex:none}
+.logo{width:40px;height:40px;border-radius:11px;flex:none;background:#fff;box-shadow:0 2px 8px #0004}
 .brand-sub{display:block;font-size:9px;font-weight:600;letter-spacing:2px;color:var(--side-text);opacity:.75;margin-top:5px}
 nav{margin-top:40px;display:grid;gap:4px}
 nav button{text-align:left;background:none;color:var(--side-text);font-weight:500;display:flex;justify-content:space-between;align-items:center;font-size:14px;padding:11px 12px;border-radius:9px}
 nav button:hover{background:var(--side-active);color:var(--side-strong)}
-nav button.selected{background:var(--side-active);color:var(--side-strong);box-shadow:inset 3px 0 0 #6fd0a8}
+nav button.selected{background:var(--side-active);color:var(--side-strong);box-shadow:inset 3px 0 0 #8b80f5}
 nav button span{font-size:11px;opacity:.45;font-variant-numeric:tabular-nums}
 .aside-bottom{margin-top:auto;font-size:11px;padding:0 6px;opacity:.8}
-.dot{display:inline-block;width:7px;height:7px;background:#6fd0a8;border-radius:50%;margin-right:6px;vertical-align:1px}
+.dot{display:inline-block;width:7px;height:7px;background:#8b80f5;border-radius:50%;margin-right:6px;vertical-align:1px}
 
 /* Layout */
 main{margin-left:228px;width:calc(100% - 228px);max-width:1440px;padding:32px 40px 28px;min-width:0}
@@ -160,7 +160,7 @@ footer{display:flex;justify-content:space-between;color:var(--faint);font-size:1
 
 /* Dialog */
 dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100vh - 32px);border:1px solid var(--line);border-radius:16px;padding:26px;box-shadow:0 24px 80px #0004;background:var(--surface);color:var(--text)}
-dialog::backdrop{background:#0b1d16b3}
+dialog::backdrop{background:#0b0a1fb3}
 .fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
 dialog p{font-size:12px}
 #complete-box{border-top:1px solid var(--line);padding-top:18px;margin-top:18px}
@@ -178,7 +178,7 @@ dialog p{font-size:12px}
   nav{display:flex;margin:10px -16px 0;padding:0 16px 4px;gap:4px;overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav button{font-size:13px;padding:7px 12px;flex:none}nav button span{display:none}
-  nav button.selected{box-shadow:inset 0 -2px 0 #6fd0a8}
+  nav button.selected{box-shadow:inset 0 -2px 0 #8b80f5}
   main{margin:0;width:100%;padding:18px 16px}
   header{margin-bottom:16px}h1{font-size:22px}
   .toolbar{width:100%}.toolbar #refreshed{margin-right:auto}
@@ -240,3 +240,32 @@ label.check input{width:auto}
 #codex-form .check{align-self:center;padding-bottom:6px}
 #codex-form label:not(.check){min-width:220px;flex:0 1 240px}
 @media(max-width:700px){#codex-form label{flex:1 1 100%}}
+/* 0.8.1: Mirasim branding, trend bars, latency list, logs */
+.aside-version{display:block;margin-top:6px;font-variant-numeric:tabular-nums;opacity:.6}
+.login-logo{width:56px;height:56px;border-radius:14px;box-shadow:0 2px 10px #0003;margin-bottom:14px;display:block}
+.two-col{display:grid;grid-template-columns:1.3fr 1fr;gap:18px}
+.two-col .card{margin-bottom:18px;min-width:0}
+.trend{display:flex;align-items:flex-end;gap:2px;height:120px;padding:6px 0 0;border-bottom:1px solid var(--line)}
+.trend .bar{flex:1 1 0;min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;border-radius:2px 2px 0 0;background:linear-gradient(to top,var(--line) 0,transparent 1px)}
+.trend .bar i{display:block;width:100%;min-height:0}
+.trend .bar i.ok{background:var(--ok);border-radius:2px 2px 0 0}
+.trend .bar i.bad{background:var(--bad)}
+.trend .bar i.warn{background:var(--warn)}
+.trend .bar:hover{filter:brightness(1.15)}
+.legend{display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.legend i.ok{background:var(--ok)}.legend i.bad{background:var(--bad)}.legend i.warn{background:var(--warn)}
+.latency{display:grid;gap:8px}
+.lat-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+.lat-name{min-width:0;display:flex;flex-direction:column;gap:2px}
+.lat-name b{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;overflow-wrap:anywhere}
+.lat-nums{display:flex;gap:14px;text-align:right}
+.lat-nums label{font-size:10px;letter-spacing:.5px;color:var(--faint);text-transform:uppercase}
+.lat-nums b{display:block;font-size:14px;font-variant-numeric:tabular-nums}
+.lat-nums div[data-tone="warn"] b{color:var(--warn)}
+td.lat-cell b{font-variant-numeric:tabular-nums}
+td.lat-cell .pill{margin-left:6px}
+.logs{margin:0;background:var(--side);color:var(--side-strong);border-radius:10px;padding:14px 16px;font-size:12px;line-height:1.55;max-height:70vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+#log-filter{width:240px}
+@media(max-width:1100px){.two-col{grid-template-columns:1fr}}
+@media(max-width:700px){.lat-row{grid-template-columns:1fr}.lat-nums{text-align:left}#log-filter{width:100%}td.lat-cell .hint{display:none}}
