@@ -28,6 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--origin', help='Defaults to the existing panel HTTPS origin')
     parser.add_argument('--repair-recovery', action='store_true', help='Install fixed host tools and retry an existing failed rollback')
+    parser.add_argument('--follow-latest', action='store_true', help='Follow the latest release of the existing matching GitHub repository')
     args = parser.parse_args()
     if os.name != 'posix' or os.geteuid() != 0:
         raise ValueError('Run on the Linux host as root, not inside the bridge container')
@@ -62,6 +63,8 @@ def main():
                 stream.write(secrets.token_hex(32) + '\n')
         config['panel'] = {'origin': url, 'token_file': str(key_file)}
         config['self_update'] = True  # from now on the web upgrade also refreshes these host tools
+        if args.follow_latest:
+            config['manifest_url'] = module.follow_latest_url(config['manifest_url'], config['image_repository'])
         for name, data in contents.items():
             file = destination / name
             file.parent.mkdir(parents=True, exist_ok=True)

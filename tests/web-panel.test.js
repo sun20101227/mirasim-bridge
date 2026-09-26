@@ -41,6 +41,26 @@ test('unknown running version never appears as latest; a later status failure cl
   assert.match(p.get('update-pill').textContent, /未知/);
 });
 
+test('manual release check bypasses cache and exposes pinned source instead of claiming latest', async () => {
+  const p = page(() => ({ latest: '0.8.2', source: { kind: 'github_pinned', pinned_version: '0.8.2' }, checked_at: 1 }));
+  p.run("bridgeVersion = '0.8.2'");
+  await p.get('check-release').events.click({ preventDefault() {} });
+  assert.equal(p.calls[0].data.force, true);
+  assert.match(p.get('release-source').textContent, /固定在 0.8.2/);
+  assert.equal(p.get('follow-latest').hidden, false);
+  assert.ok(!p.get('update-pill').textContent.includes('已是最新版本'));
+  p.run("bridgeVersion = '0.8.4'"); await p.run('checkRelease()');
+  assert.match(p.get('update-pill').textContent, /高于发布源/);
+});
+
+test('failed update check clears previous version rather than leaving a false latest result', async () => {
+  const p = page(() => { throw Error('network unavailable'); });
+  p.get('latest-version').textContent = '0.8.2';
+  await assert.rejects(p.run('checkRelease(true)'), /network/);
+  assert.equal(p.get('latest-version').textContent, '—');
+  assert.match(p.get('update-pill').textContent, /不能确认/);
+});
+
 for (const provider of ['google', 'github']) test(`browser shows ${provider} link and submits normalized independent profile`, async () => {
   const p = page(() => ({ id: 'login-id', provider, url: `https://auth.mirasim.ai/auth/oauth/${provider}/login?state=test` }));
   p.get('profile').value = provider === 'github' ? 'name@example.com' : '';

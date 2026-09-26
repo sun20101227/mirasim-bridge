@@ -54,13 +54,15 @@ class Console:
             self.events = self.events[-100:]
             self.persist(self.audit_file, self.events)
 
-    def check_release(self):
+    def check_release(self, force=False):
         # Read-only: the fixed manifest URL from the host config; cached so the page cannot hammer GitHub.
         with self.release_lock:
-            if self.release_cache and time.monotonic() - self.release_cache[0] < 60:
-                return self.release_cache[1]
+            if not force and self.release_cache and time.monotonic() - self.release_cache[0] < 60:
+                return {**self.release_cache[1], 'cached': True}
+            self.release_cache = None
             manifest = self.agent.fetch(self.agent.cfg['manifest_url'], self.agent.cfg['image_repository'])
-            result = {'latest': manifest['version'], 'checked_at': int(time.time())}
+            result = {'latest': manifest['version'], 'checked_at': int(time.time()), 'cached': False,
+                      'source': self.agent.release_source(), 'resolved_via': manifest.get('_resolution', 'configured_source')}
             self.release_cache = (time.monotonic(), result)
             return result
 
@@ -164,9 +166,30 @@ class Console:
             return self.events[-50:]
         if op == 'release/check':
             try:
-                return self.check_release()
+                if type(data.get('force', False)) is not bool:
+                    raise ValueError('Invalid force flag')
+                return self.check_release(force=data.get('force', False))
             except Exception:
                 raise ValueError('Release manifest unavailable') from None
+        if op == 'release/follow-latest':
+            if data != {'confirm': True} or not self.agent.cfg.get('_config_file'):
+                raise ValueError('Explicit confirmation and an installed host config are required')
+            if not self.agent.lock.acquire(blocking=False):
+                raise ValueError('Wait for the current management operation')
+            try:
+                with self.release_lock:
+                    url = self.agent.latest_manifest_url()
+                    file = Path(self.agent.cfg['_config_file'])
+                    stored = json.loads(file.read_text())
+                    if stored.get('manifest_url') != self.agent.cfg['manifest_url']:
+                        raise ValueError('Release source changed on disk; restart the host service first')
+                    self.persist(file, {**stored, 'manifest_url': url})
+                    self.agent.cfg['manifest_url'] = url
+                    self.release_cache = None
+                self.audit(op, 'all', True)
+                return {'source': self.agent.release_source()}
+            finally:
+                self.agent.lock.release()
         if op in ('deploy', 'rollback'):
             accepted = self.agent.start(recover=op == 'rollback')
             # Acceptance is not completion; the durable deployment journal owns the result.

@@ -53,10 +53,34 @@ class PanelHostTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, 'second check within 60 s is served from cache')
         self.assertEqual(calls[0][0], self.agent.cfg['manifest_url'])
         self.assertFalse(self.fixture.calls, 'no Docker command is run')
+        fresh = console.call({'operation': 'release/check', 'data': {'force': True}})
+        self.assertEqual(len(calls), 2, 'manual refresh bypasses the 60 second cache')
+        self.assertFalse(fresh['cached'])
+        self.assertEqual(fresh['source'], {'kind': 'custom'})
         console.release_cache = None
         self.agent.fetch = lambda *_: (_ for _ in ()).throw(OSError('network detail'))
         with self.assertRaisesRegex(ValueError, 'Release manifest unavailable'):
             console.call({'operation': 'release/check'})
+
+    def test_follow_latest_preserves_installed_config_and_cannot_change_repository(self):
+        self.agent.cfg['manifest_url'] = 'https://github.com/example/mirasim/releases/download/v0.8.2/deploy.json'
+        file = self.fixture.root / 'host-config.json'
+        stored = {**self.agent.cfg, 'panel': {'origin': 'https://panel.example', 'token_file': 'keep-panel-key'}}
+        m.atomic_json(file, stored)
+        self.agent.cfg['_config_file'] = str(file)
+        console = p.Console(self.agent, m.atomic_json)
+        self.agent.lock.acquire()
+        try:
+            with self.assertRaisesRegex(ValueError, 'Wait'):
+                console.call({'operation': 'release/follow-latest', 'data': {'confirm': True}})
+        finally:
+            self.agent.lock.release()
+        with self.assertRaises(ValueError):
+            console.call({'operation': 'release/follow-latest', 'data': {'confirm': True, 'url': 'https://evil.test'}})
+        result = console.call({'operation': 'release/follow-latest', 'data': {'confirm': True}})
+        self.assertEqual(result['source']['kind'], 'github_latest')
+        after = json.loads(file.read_text())
+        self.assertEqual(after, {**stored, 'manifest_url': 'https://github.com/example/mirasim/releases/latest/download/deploy.json'})
 
     def test_failed_recovery_keeps_diagnostics_readable_but_blocks_mutations(self):
         self.agent.save(phase='rollback_failed')

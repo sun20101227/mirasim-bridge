@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.8.4）
+# Mira 网页管理后台（0.8.5）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -14,13 +14,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.4/mirasim-bridge-0.8.4-source.zip \
-  -o mirasim-bridge-0.8.4-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.5/mirasim-bridge-0.8.5-source.zip \
+  -o mirasim-bridge-0.8.5-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.4/mirasim-bridge-0.8.4-source.zip.sha256 \
-  -o mirasim-bridge-0.8.4-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.4-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.4-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.5/mirasim-bridge-0.8.5-source.zip.sha256 \
+  -o mirasim-bridge-0.8.5-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.5-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.5-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 

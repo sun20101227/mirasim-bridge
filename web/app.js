@@ -373,16 +373,32 @@ async function deployment() {
     row.append(when, what, e.ok ? pill(requested ? '已接受任务' : '完成', requested ? 'info' : 'ok') : pill(requested ? '未接受任务' : '失败', 'bad')); return row;
   }) : [empty('还没有管理操作记录')]));
 }
-async function checkRelease() {
-  const r = await api('release/check'); $('latest-version').textContent = r.latest;
+async function checkRelease(force = false) {
+  let r;
+  try { r = await api('release/check', { force: force === true }); }
+  catch (err) {
+    $('latest-version').textContent = '—'; $('update-pill').hidden = false;
+    $('update-pill').className = 'pill warn'; $('update-pill').textContent = '检查失败，不能确认最新版本';
+    $('release-source').textContent = '检查失败，未沿用之前的结果。请确认服务器能访问发布源。';
+    throw err;
+  }
+  $('latest-version').textContent = r.latest;
+  const pinned = r.source?.kind === 'github_pinned';
+  $('release-label').textContent = pinned ? '固定发布版本' : '最新发布';
+  $('follow-latest').hidden = !pinned;
+  const source = pinned ? `发布源固定在 ${r.source.pinned_version}，不会自动发现新版本。`
+    : r.source?.kind === 'github_latest' ? `自动跟随 ${r.source.repository} 的正式发布。`
+    : r.source?.kind === 'custom' ? '使用自定义发布源；请确认该地址会更新。' : '旧版后台未提供发布源信息。';
+  $('release-source').textContent = source + (r.checked_at ? ` 检查时间 ${new Date(r.checked_at * 1000).toLocaleTimeString()}${r.cached ? '（短时缓存）' : '（实时查询）'}` : '')
+    + (r.resolved_via === 'github_download_fallback' ? ' GitHub API 暂不可用，本次使用下载地址查询。' : '');
   if (!bridgeVersion) {
     $('update-pill').hidden = false; $('update-pill').className = 'pill warn';
     $('update-pill').textContent = '运行版本未知，请检查桥接器状态'; return;
   }
-  const newer = bridgeVersion && versionNewer(r.latest, bridgeVersion);
+  const newer = versionNewer(r.latest, bridgeVersion), older = versionNewer(bridgeVersion, r.latest);
   $('update-pill').hidden = false;
-  $('update-pill').className = 'pill ' + (newer ? 'info' : 'ok');
-  $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : '已是最新版本';
+  $('update-pill').className = 'pill ' + (newer ? 'info' : older || pinned ? 'warn' : 'ok');
+  $('update-pill').textContent = newer ? `可升级到 ${r.latest}` : older ? '当前运行版本高于发布源' : pinned ? '已是固定版本；可切换为跟随最新发布' : '已是最新版本';
 }
 async function refresh() {
   groupsCache = null;
@@ -432,7 +448,11 @@ $('check-all-accounts').addEventListener('click', guarded(async () => {
 }));
 document.addEventListener('visibilitychange', () => { if (document.hidden) hideAccess(); });
 $('log-filter').addEventListener('input', () => { logs().catch(() => {}); });
-$('check-release').addEventListener('click', guarded(checkRelease));
+$('check-release').addEventListener('click', guarded(() => checkRelease(true)));
+$('follow-latest').addEventListener('click', guarded(async () => {
+  if (!confirm('将当前固定版本地址改为同一个 GitHub 仓库的最新正式发布？不会立即升级或改变账号。')) return;
+  await api('release/follow-latest', { confirm: true }); await checkRelease(true);
+}));
 $('settings-form').addEventListener('submit', guarded(async () => {
   const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value, kimi_default_effort: $('kimi-effort').value });
   const r = await api('settings', data); notice(`${label(selected)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
@@ -546,5 +566,5 @@ $('complete-form').addEventListener('submit', guarded(async () => {
   await finishLogin(r, session);
 }));
 $('mode').textContent = host ? '宿主机管理' : '单 bridge 管理';
-for (const id of ['start-account', 'stop-account', 'deploy', 'rollback', 'deploy-status', 'check-release']) $(id).disabled = !host;
+for (const id of ['start-account', 'stop-account', 'deploy', 'rollback', 'deploy-status', 'check-release', 'follow-latest']) $(id).disabled = !host;
 $('release-note').textContent = host ? '升级失败会自动尝试回退。这里显示服务器的真实进度，操作记录不包含凭证。' : '当前为单 bridge 页面；完整的升级、回退和容器启停请使用宿主机后台（8790）。';

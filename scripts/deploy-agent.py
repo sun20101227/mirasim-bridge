@@ -12,7 +12,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.error import URLError
 
 LOCAL_IMAGE = 'mirasim-bridge:local'
 ACTIVE = {'checking', 'pulling', 'activating', 'rolling_back'}
@@ -116,12 +117,62 @@ class HTTPSRedirects(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def release_source(url):
+    u = urlsplit(https_url(url))
+    match = re.fullmatch(r'/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/(latest/download|download/(v\d+\.\d+\.\d+))/deploy\.json', u.path)
+    if u.hostname != 'github.com' or u.port not in (None, 443) or u.query or not match:
+        return {'kind': 'custom'}
+    return {'kind': 'github_latest' if match[2] == 'latest/download' else 'github_pinned',
+            'repository': match[1], 'pinned_version': match[3][1:] if match[3] else None}
+
+
+def follow_latest_url(url, repository):
+    source = release_source(url)
+    if source['kind'] == 'custom' or repository.lower() != 'ghcr.io/' + source['repository'].lower():
+        raise ValueError('Only a matching GitHub/GHCR source can follow latest automatically')
+    return f"https://github.com/{source['repository']}/releases/latest/download/deploy.json"
+
+
+def fetch_json(url, limit=65536, refresh=False):
+    https_url(url)
+    # Add a nonce only to known GitHub URLs, never custom/signed sources.
+    if refresh:
+        url += ('&' if '?' in url else '?') + 'mirasim_check=' + secrets.token_hex(8)
+    req = Request(url, headers={'Cache-Control': 'no-cache, no-store', 'Pragma': 'no-cache',
+                               'User-Agent': 'mirasim-bridge-updater', 'Accept': 'application/json'})
+    with build_opener(HTTPSRedirects()).open(req, timeout=20) as response:
+        raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('Release response too large')
+    return json.loads(raw)
+
+
 def fetch_manifest(url, repository):
-    with build_opener(HTTPSRedirects()).open(https_url(url), timeout=30) as response:
-        raw = response.read(65537)
-    if len(raw) > 65536:
-        raise ValueError('Release manifest too large')
-    return validate_manifest(json.loads(raw), repository)
+    source = release_source(url)
+    resolved, expected, via = url, None, 'configured_source'
+    if source['kind'] == 'github_latest':
+        repo = source['repository']
+        try:
+            latest = fetch_json(f'https://api.github.com/repos/{repo}/releases/latest', limit=1024 * 1024, refresh=True)
+        except (URLError, TimeoutError, OSError):
+            # API limits/outages may leave assets reachable. Report this fallback.
+            latest = None
+            via = 'github_download_fallback'
+        if via != 'github_download_fallback':
+            tag = latest.get('tag_name') if isinstance(latest, dict) else None
+            if not isinstance(tag, str) or not re.fullmatch(r'v\d+\.\d+\.\d+', tag) or latest.get('draft') or latest.get('prerelease'):
+                raise ValueError('Invalid stable GitHub release')
+            resolved = f'https://github.com/{repo}/releases/download/{tag}/deploy.json'
+            if not any(isinstance(a, dict) and a.get('name') == 'deploy.json' and a.get('browser_download_url') == resolved
+                       for a in latest.get('assets', [])):
+                raise ValueError('Stable release has no matching deployment manifest')
+            expected, via = tag[1:], 'github_api'
+    elif source['kind'] == 'github_pinned':
+        expected = source['pinned_version']
+    manifest = validate_manifest(fetch_json(resolved, refresh=source['kind'] != 'custom'), repository)
+    if expected is not None and manifest['version'] != expected:
+        raise ValueError('Release tag and manifest version differ')
+    return {**manifest, '_resolution': via}
 
 
 def validate_manifest(data, repository):
@@ -267,6 +318,12 @@ class Agent:
             return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error', 'remote_command',
                                                 'host_updated', 'host_restart', 'host_restored', 'failure', 'recovery_errors',
                                                 'target_health') if k in self.state}
+
+    def release_source(self):
+        return release_source(self.cfg['manifest_url'])
+
+    def latest_manifest_url(self):
+        return follow_latest_url(self.cfg['manifest_url'], self.cfg['image_repository'])
 
     @staticmethod
     def failure_detail(step, exc, target=None):
