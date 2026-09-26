@@ -27,6 +27,35 @@ Mirasim 定价页的“Verify it yourself”列出四项检测：并排对比、
 4. **`count_tokens` 不能用来识别模型。** 所有模型对同一段文字都返回 32，包括当时不可用的模型，说明它使用统一的计数方式。
 5. **GPT 与 DeepSeek 当时在 Messages 接口没有容量**，本机无法验证 astra 的身份。GPT 请在服务器上按下面的方法复测。
 
+## 2026-09-26 复核（0.8.0）
+
+同样用本机独立会话，每个模型先问身份，再做 5 道有确定答案的短题（17×23、反转 "bridge"、三段论、strawberry 里 r 的个数、水的化学式），并比较每次响应的 `model` 与请求。
+
+| 模型 | 自称 | 响应 model | 推理题 | 备注 |
+|---|---|---|---|---|
+| claude-opus-4-8 | Claude / Anthropic | claude-opus-4-8 | 5/5 | 每题 2.9–3.2 s |
+| claude-sonnet-5 | Claude / Anthropic | claude-sonnet-5 | 5/5 | 每题 1.9–3.2 s |
+| claude-haiku-4-5 | Claude / Anthropic | claude-haiku-4-5-20251001 | 5/5 | 带日期别名，按客户端规则视为同一模型，不计为替换 |
+| kimi-k3 | Kimi / Moonshot AI | kimi-k3 | 5/5 | 思考以 `thinking_delta` 事件返回（28 个），正文干净 |
+| gpt-6-astra / gpt-6-sol / gpt-5.6-luna | — | — | — | 503 no upstream available |
+| deepseek-flash | — | — | — | 503 no upstream available |
+
+- 全部响应无 U+FFFD 替换字符；中文回答（“水的化学式是 H₂O。”）原样返回。
+- 目录新增 `claude-fable-5-1`、`claude-opus-5-5`、`glm-5.3-flash`。GLM 不在默认 `model_filter` 内，不会进入 sub2 模型映射；fable 系列默认被 `model_block` 挡住。
+- 没有发现“智力降级”迹象：三款 Claude 与 Kimi 在这组题上全部答对，回复长度和措辞与各自官方模型一致。这组题只能排除明显的降级或换模型，不能证明与官方 API 完全等价。
+- GPT 与 DeepSeek 在本机依旧没有容量，仍需在服务器上按下节复测。
+
+同日再经 **0.8.0 bridge 的完整转发链路**（session 后端 + 保活会话，`x-api-key` 鉴权，不带 system 由 bridge 注入）复测：
+
+| 经 bridge | HTTP | 响应 model | 回答 |
+|---|---|---|---|
+| claude-haiku-4-5 | 200 | claude-haiku-4-5-20251001 | “Anthropic trained me. 17 × 23 = 391” |
+| claude-sonnet-5 | 200 | claude-sonnet-5 | “Anthropic trained me. 17*23 = 391” |
+| kimi-k3 | 200 | kimi-k3 | “Moonshot AI (月之暗面).”，思考以 15 个 `thinking_delta` 事件返回，正文干净 |
+| gpt-6-astra / deepseek-flash | 503 | — | 上游无容量，原样透传 |
+
+bridge 计数：`injected=2`（只给两个 Claude 请求注入身份块，Kimi 未注入）、`fallback=0`、`models_filtered=3`（fable ×2、glm ×1 未进入目录）、错误密钥返回 503。Kimi 在 `max_tokens` 很小（120）时会把推理直接写进正文并以 `max_tokens` 结束，给它足够预算（≥300）后推理回到 `thinking_delta`，这是上游行为。
+
 ## 逐轮查看路由（模型替换）
 
 Mirasim 在额度不足时可能用别的模型顶替本轮，并在响应的 `model` 字段报告实际模型。桌面客户端据此记录 `modelRoute = {requested, served}`，并提供“被替换时中断本轮”选项。

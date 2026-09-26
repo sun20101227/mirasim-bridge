@@ -15,9 +15,12 @@ async function main() {
   catch (err) { if (err.code !== 'EEXIST') throw err; }
   const key = fs.readFileSync(keyFile, 'utf8').trim();
   if (data.operation === 'panel-key') { process.stdout.write(JSON.stringify({ status: 200, data: { panel_key: key } })); return; }
-  if (!['status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'profile/info', 'groups', 'login/start', 'login/complete', 'login/status'].includes(data.operation)) throw Error('unknown operation');
+  if (!['status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'profile/info', 'groups', 'login/start', 'login/complete', 'login/status',
+    'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume'].includes(data.operation)) throw Error('unknown operation');
   const body = JSON.stringify(data.data || {});
-  const status = data.operation === 'status';
+  // status goes through the panel op too: /__status only ever describes the account whose secret
+  // is presented, while the panel op honours data.account (hosted accounts, 0.8.0).
+  const status = false;
   const host = process.env.MIRASIM_LISTEN_HOST || cfg.listen.host;
   const req = http.request({ host: ['::', '0.0.0.0'].includes(host) ? '127.0.0.1' : host,
     port: Number(process.env.MIRASIM_LISTEN_PORT || cfg.listen.port),

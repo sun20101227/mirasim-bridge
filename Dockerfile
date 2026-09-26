@@ -6,7 +6,7 @@ WORKDIR /app
 COPY --chown=node:node mirasim-bridge.js ./
 COPY --chown=node:node lib/ ./lib/
 COPY --chown=node:node web/ ./web/
-COPY --chown=node:node scripts/deployment.js scripts/export-credential.js scripts/prepare-container.js scripts/container-config.js scripts/healthcheck.js scripts/account-login.js scripts/panel-bridge.js ./scripts/
+COPY --chown=node:node scripts/deployment.js scripts/export-credential.js scripts/prepare-container.js scripts/container-config.js scripts/healthcheck.js scripts/account-login.js scripts/panel-bridge.js scripts/deploy-agent.py scripts/panel-host.py scripts/install-panel.py ./scripts/
 COPY THIRD-PARTY-NOTICES.md ./
 COPY licenses/ ./licenses/
 RUN mkdir -p /data && chown node:node /data

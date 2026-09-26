@@ -51,6 +51,7 @@ def main():
             with os.fdopen(fd, 'w') as stream:
                 stream.write(secrets.token_hex(32) + '\n')
         config['panel'] = {'origin': url, 'token_file': str(key_file)}
+        config['self_update'] = True  # from now on the web upgrade also refreshes these host tools
         for name, data in contents.items():
             file = destination / name
             file.parent.mkdir(parents=True, exist_ok=True)

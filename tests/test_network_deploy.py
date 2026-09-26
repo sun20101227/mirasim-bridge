@@ -24,12 +24,20 @@ class DeploymentTests(unittest.TestCase):
         (self.root / 'compose.yaml').write_text('services: {}')
         (self.root / 'compose.profile.yaml').write_text('services: {}')
         (self.root / '.env.second').write_text('MIRASIM_PROFILE=second')
+        self.host = self.root / 'opt'
+        self.host.mkdir()
+        (self.host / 'deploy-agent.py').write_text('OLD_AGENT = 1\n')
+        (self.host / 'web').mkdir()
+        (self.host / 'web' / 'app.js').write_text('old app')
         self.cfg = {'manifest_url': 'https://example.test/deploy.json', 'image_repository': 'ghcr.io/example/mirasim',
                     'project_dir': str(self.root), 'state_dir': str(self.root / 'state'), 'health_timeout_sec': 10,
-                    'targets': [{'name': 'main', 'compose_file': 'compose.yaml'}]}
+                    'targets': [{'name': 'main', 'compose_file': 'compose.yaml'}], 'host_dir': str(self.host)}
         self.calls = []
         self.fail_pull = False
         self.version = '0.6.0'
+        # What the new image carries at HOST_FILES paths; tests may alter it.
+        self.image_files = {'deploy-agent.py': b'NEW_AGENT = 2\n', 'panel-host.py': b'PANEL = 1\n',
+                            'web/index.html': b'<html>', 'web/app.js': b'new app', 'web/style.css': b'css'}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -40,6 +48,14 @@ class DeploymentTests(unittest.TestCase):
             raise RuntimeError('failed pull')
         if args[:2] == ['docker', 'run'] and args[-1] == '--version':
             return self.version
+        if args[:2] == ['docker', 'create']:
+            return 'e' * 64
+        if args[:2] == ['docker', 'cp']:
+            name = next(n for n, src in m.HOST_FILES.items() if args[2].endswith(':' + src))
+            Path(args[3]).write_bytes(self.image_files[name])
+            return ''
+        if args[0] == 'systemd-run':
+            return ''
         if args[:3] == ['docker', 'image', 'inspect']:
             return OLD
         if args[:2] == ['docker', 'inspect']:
@@ -268,6 +284,84 @@ class DeploymentTests(unittest.TestCase):
         remote = {'target': 'main', 'enrolled_at': 90}
         result = module.make_command('main', 'deploy', now=100)
         self.assertEqual(m.validate_remote_command(result, remote, now=101), result)
+
+
+class HostSelfUpdateTests(DeploymentTests):
+    """One web click updates the containers and, from the same verified image, the host tools."""
+
+    def test_success_installs_changed_host_files_backs_up_and_restarts_service(self):
+        agent = self.agent()
+        agent.deploy()
+        status = agent.status()
+        self.assertEqual(status['phase'], 'succeeded')
+        self.assertTrue(status['host_updated'] and status['host_restart'])
+        self.assertEqual((self.host / 'deploy-agent.py').read_bytes(), b'NEW_AGENT = 2\n')
+        self.assertEqual((self.host / 'web' / 'app.js').read_bytes(), b'new app')
+        self.assertEqual((self.host / 'panel-host.py').read_bytes(), b'PANEL = 1\n')
+        backup = Path(agent.state['host_backup'])
+        self.assertEqual((backup / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
+        self.assertFalse((backup / 'panel-host.py').exists(), 'files that did not exist before are not backed up')
+        stage = next(i for i, c in enumerate(self.calls) if c[:2] == ['docker', 'cp'])
+        stop = next(i for i, c in enumerate(self.calls) if c[-2:] == ['stop', 'bridge'])
+        self.assertLess(stage, stop, 'host files are staged and validated before any container stops')
+        self.assertTrue(any(c[:2] == ['docker', 'rm'] for c in self.calls))
+        restart = self.calls[-1]
+        self.assertEqual(restart[0], 'systemd-run')
+        self.assertEqual(restart[-3:], ['systemctl', 'restart', 'mirasim-deploy.service'])
+        self.assertLess(self.calls.index(restart), len(self.calls), 'restart is the very last step')
+        self.assertFalse(list((self.root / 'state').glob('stage-*')), 'staging directory removed')
+
+    def test_identical_host_files_skip_install_and_restart(self):
+        for name, data in self.image_files.items():
+            (self.host / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.host / name).write_bytes(data)
+        agent = self.agent()
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'succeeded')
+        self.assertFalse(agent.status()['host_updated'])
+        self.assertFalse(any(c[0] == 'systemd-run' for c in self.calls))
+
+    def test_unparsable_agent_in_image_fails_before_any_container_or_host_change(self):
+        self.image_files['deploy-agent.py'] = b'def broken(:\n'
+        agent = self.agent()
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'failed')
+        self.assertEqual((self.host / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
+        self.assertFalse(any(c[-2:] == ['stop', 'bridge'] or c[:2] == ['docker', 'tag'] for c in self.calls))
+
+    def test_rollback_restores_previous_host_tools_and_restarts(self):
+        agent = self.agent()
+        agent.deploy()
+        self.calls = []
+        agent.start(recover=True)
+        agent.worker.join(5)
+        self.assertEqual(agent.status()['phase'], 'rolled_back')
+        self.assertEqual((self.host / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
+        self.assertEqual((self.host / 'web' / 'app.js').read_text(), 'old app')
+        self.assertFalse((self.host / 'panel-host.py').exists(), 'a file added by the release is removed again')
+        self.assertEqual(self.calls[-1][0], 'systemd-run')
+        self.assertEqual(agent.status()['host_restored'], ['deploy-agent.py', 'panel-host.py', 'web/index.html', 'web/app.js', 'web/style.css'])
+
+    def test_container_failure_after_staging_leaves_host_tools_untouched(self):
+        agent = self.agent()
+        attempts = []
+        def readiness(_):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError('unhealthy')
+        agent.ready = readiness
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'rolled_back')
+        self.assertEqual((self.host / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
+        self.assertFalse(any(c[0] == 'systemd-run' for c in self.calls))
+
+    def test_self_update_can_be_disabled(self):
+        self.cfg['self_update'] = False
+        agent = self.agent()
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'succeeded')
+        self.assertFalse(any(c[:2] in (['docker', 'create'], ['docker', 'cp']) for c in self.calls))
+        self.assertEqual((self.host / 'deploy-agent.py').read_text(), 'OLD_AGENT = 1\n')
 
 
 if __name__ == '__main__':

@@ -16,6 +16,12 @@ from urllib.request import HTTPRedirectHandler, build_opener
 
 LOCAL_IMAGE = 'mirasim-bridge:local'
 ACTIVE = {'checking', 'pulling', 'activating', 'rolling_back'}
+HOST_DIR = Path('/opt/mirasim-deploy')
+# Host tools ship inside the same digest-pinned bridge image; they are copied out only after the
+# image passed version + selftest checks, so one web click upgrades containers AND this service.
+HOST_FILES = {'deploy-agent.py': '/app/scripts/deploy-agent.py', 'panel-host.py': '/app/scripts/panel-host.py',
+              'web/index.html': '/app/web/index.html', 'web/app.js': '/app/web/app.js', 'web/style.css': '/app/web/style.css'}
+SERVICE_FILES = ('deploy-agent.py', 'panel-host.py')
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -201,6 +207,8 @@ class Agent:
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {'phase': 'idle'}
         self.lock, self.data_lock = threading.Lock(), threading.RLock()
         self.worker = None
+        self.host_dir = Path(config.get('host_dir') or HOST_DIR)
+        self.self_update = config.get('self_update', True) is True
         self.targets = config['targets']
         if not self.targets or len(self.targets) > 32:
             raise ValueError('Configure between 1 and 32 bridge targets')
@@ -233,7 +241,98 @@ class Agent:
 
     def status(self):
         with self.data_lock:
-            return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error', 'remote_command') if k in self.state}
+            return {k: self.state[k] for k in ('phase', 'job_id', 'version', 'updated_at', 'error', 'remote_command',
+                                                'host_updated', 'host_restart', 'host_restored') if k in self.state}
+
+    # --- host tool self-update -------------------------------------------------------------
+    def stage_host_files(self, image, job):
+        import shutil
+        stage = self.state_file.parent / ('stage-' + job)
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir(mode=0o700)
+        container = self.run(['docker', 'create', '--network', 'none', image, '--version'])
+        if not re.fullmatch(r'[0-9a-f]{12,64}', container):
+            raise ValueError('Unexpected container id')
+        try:
+            for name, source in HOST_FILES.items():
+                dest = stage / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                self.run(['docker', 'cp', container + ':' + source, str(dest)])
+        finally:
+            try:
+                self.run(['docker', 'rm', '-f', container])
+            except RuntimeError:
+                pass
+        changed = []
+        for name in HOST_FILES:
+            data = (stage / name).read_bytes()
+            if not data:
+                raise ValueError('Release image is missing a host file')
+            if name.endswith('.py'):
+                compile(data, name, 'exec')  # never install a script this interpreter cannot parse
+            current = self.host_dir / name
+            if not current.exists() or current.read_bytes() != data:
+                changed.append(name)
+        return {'dir': str(stage), 'changed': changed}
+
+    def install_host_file(self, source, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        tmp = dest.with_name(dest.name + '.' + secrets.token_hex(8) + '.tmp')
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755 if dest.name == 'deploy-agent.py' else 0o644)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(Path(source).read_bytes())
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+    def apply_host_files(self, stage):
+        import shutil
+        if not stage or not stage['changed']:
+            return False
+        backup = self.state_file.parent / 'host-backup'
+        if backup.exists():
+            shutil.rmtree(backup)
+        backup.mkdir(mode=0o700)
+        for name in stage['changed']:
+            current = self.host_dir / name
+            if current.exists():
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(current, backup / name)
+        self.save(host_backup=str(backup), host_changed=list(stage['changed']))  # journal before touching /opt
+        for name in stage['changed']:
+            self.install_host_file(Path(stage['dir']) / name, self.host_dir / name)
+        shutil.rmtree(stage['dir'], ignore_errors=True)
+        return True
+
+    def restore_host_files(self):
+        backup, changed = self.state.get('host_backup'), self.state.get('host_changed') or []
+        if not backup or not changed:
+            return False
+        for name in changed:
+            source = Path(backup) / name
+            if source.exists():
+                self.install_host_file(source, self.host_dir / name)
+            else:
+                try:
+                    (self.host_dir / name).unlink()  # did not exist before that release
+                except FileNotFoundError:
+                    pass
+        self.save(host_changed=[], host_restored=list(changed))
+        return any(name in SERVICE_FILES for name in changed)
+
+    def schedule_service_restart(self, job):
+        # Restart ourselves from outside this cgroup, after the journal is on disk.
+        try:
+            self.run(['systemd-run', '--on-active=3', '--unit', 'mirasim-deploy-restart-' + job, '--quiet',
+                      'systemctl', 'restart', 'mirasim-deploy.service'])
+            return True
+        except RuntimeError:
+            return False
 
     def compose(self, target, *args, timeout=180):
         argv = ['docker', 'compose', '--project-directory', str(self.project)]
@@ -277,6 +376,11 @@ class Agent:
     def rollback(self):
         self.save(phase='rolling_back')
         failed = False
+        restart = False
+        try:
+            restart = self.restore_host_files()
+        except Exception:
+            failed = True
         for item in self.state['snapshots']:
             try:
                 self.run(['docker', 'tag', item['image'], LOCAL_IMAGE])
@@ -288,8 +392,10 @@ class Agent:
             self.run(['docker', 'tag', self.state['previous_tag'], LOCAL_IMAGE])
         except Exception:
             failed = True
-        self.save(phase='rollback_failed' if failed else 'rolled_back',
+        self.save(phase='rollback_failed' if failed else 'rolled_back', host_restart=restart,
                   error='Recovery incomplete; check containers locally' if failed else None)
+        if restart:
+            self.schedule_service_restart(self.state.get('job_id') or secrets.token_hex(6))
 
     def deploy(self):
         changed = False
@@ -302,16 +408,23 @@ class Agent:
             if version != manifest['version']:
                 raise ValueError('Image version differs from release manifest')
             self.run(['docker', 'run', '--rm', '--network', 'none', manifest['image'], 'selftest'])
+            job = self.state.get('job_id') or secrets.token_hex(6)
+            stage = self.stage_host_files(manifest['image'], job) if self.self_update else None
             snapshots, previous = self.snapshot()
             # Journal before the first mutation; a restarted agent can recover.
-            self.save(phase='activating', snapshots=snapshots, previous_tag=previous)
+            self.save(phase='activating', snapshots=snapshots, previous_tag=previous, host_backup=None, host_changed=[],
+                      host_updated=False, host_restart=False, host_restored=None)
             changed = True
             self.run(['docker', 'tag', manifest['image'], LOCAL_IMAGE])
             for item in snapshots:
                 self.compose(item['target'], 'stop', 'bridge', timeout=210)
                 self.compose(item['target'], 'up', '-d', '--no-build', '--pull', 'never', '--force-recreate', 'bridge')
                 self.ready(item['target'])
-            self.save(phase='succeeded', error=None)
+            host_updated = self.apply_host_files(stage)
+            restart = host_updated and any(name in SERVICE_FILES for name in stage['changed'])
+            self.save(phase='succeeded', error=None, host_updated=host_updated, host_restart=restart)
+            if restart:
+                self.schedule_service_restart(job)
         except Exception:
             if changed:
                 self.rollback()
@@ -475,7 +588,8 @@ def install(args):
         raise ValueError('Agent already installed; edit its config and restart instead')
     config = {'manifest_url': args.manifest, 'image_repository': args.image_repository,
               'project_dir': str(project), 'targets': targets, 'port': 8790,
-              'state_dir': '/var/lib/mirasim-deploy', 'token_file': str(directory / 'api.key'), 'health_timeout_sec': 180}
+              'state_dir': '/var/lib/mirasim-deploy', 'token_file': str(directory / 'api.key'), 'health_timeout_sec': 180,
+              'self_update': True}
     agent = Agent(config)
     agent.snapshot()  # Prove Docker access and standard Compose topology first.
     destination = Path('/opt/mirasim-deploy/deploy-agent.py')

@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.7.2）
+# Mira 网页管理后台（0.8.0）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -6,7 +6,7 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 
 ## 1. 已装部署工具：通过网页终端安装一次后台
 
-**从 0.7.0/0.7.1 升级到 0.7.2 也要执行这一步**：网页文件和宿主机服务装在 `/opt/mirasim-deploy`，只升级 bridge 镜像不会更新它们。安装器会保留现有管理密钥，重复执行是安全的。
+**从 0.7.x 升级到 0.8.0 要执行最后一次这一步**：网页文件和宿主机服务装在 `/opt/mirasim-deploy`，旧版部署服务不会自己换成新版。0.8.0 起，网页“升级至最新发布”会从同一个经过校验的镜像中取出宿主机工具并一并更新、必要时重启自身（`self_update`），以后不再需要进终端。安装器会保留现有管理密钥，重复执行是安全的。
 
 在云厂商网页终端、宝塔/1Panel **宿主机终端**执行。前提是现有 bridge 和 `mirasim-deploy.service` 已按 NETWORK-DEPLOY.md 安装。把最后的域名改成你的真实域名，必须为 HTTPS，末尾不要加 `/`。
 
@@ -14,13 +14,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.2/mirasim-bridge-0.7.2-source.zip \
-  -o mirasim-bridge-0.7.2-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.0/mirasim-bridge-0.8.0-source.zip \
+  -o mirasim-bridge-0.8.0-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.7.2/mirasim-bridge-0.7.2-source.zip.sha256 \
-  -o mirasim-bridge-0.7.2-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.7.2-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.7.2-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.0/mirasim-bridge-0.8.0-source.zip.sha256 \
+  -o mirasim-bridge-0.8.0-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.0-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.0-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
@@ -80,7 +80,7 @@ server {
 - `rolled_back`：升级失败，已回退。
 - `rollback_failed`：回退未完成，需要查看宿主机日志并修复。
 
-升级/回退只使用服务器已配置的发布源，网页不能输入镜像地址或命令。后续只更换 bridge 镜像，宿主机工具的更新仍需安装器；如果以后版本需要更新宿主机，会在发布说明明确说明。
+升级/回退只使用服务器已配置的发布源，网页不能输入镜像地址或命令。0.8.0 起升级同时更新宿主机工具：镜像内的 `deploy-agent.py`、`panel-host.py` 和网页文件先做语法校验，容器就绪后写入 `/opt/mirasim-deploy` 并备份旧版，最后重启部署服务（页面短暂断开，刷新后重新输入密钥）。回退会一并恢复上一版宿主机工具。状态里的 `host_updated / host_restart / host_restored` 说明这次是否动了宿主机。
 
 ## 4. 邮箱验证码 / Google 添加新账号
 
@@ -88,8 +88,8 @@ server {
 2. 选择 **邮箱验证码**，输入邮箱，点击发送，然后输入邮件中的验证码。错误可重试，最多 5 次，发送间隔至少 60 秒。验证码由 Mirasim 发出。
 3. 或选择 **Google 授权**，在无痕窗口打开授权链接，完成后复制地址栏的最终回调 URL，粘贴到表单并验证。回调打不开属服务器登录的正常情况；不要把含 token 的地址发到聊天或日志。
 4. 保存成功后，原账号的凭证保持不变，新凭证保存在 `/data/profiles/名字/`。
-5. 在 profile 列表点击 **“启动并注册到 sub2”**。后台生成独立 Compose 文件并启动容器，自动加入受管目标。
-6. 切换账号，下次刷新确认调度为“已入池”。注册依赖已有的 sub2 管理 Key；同组共享池，不同组隔离调用。
+5. 默认勾选 **“托管到当前 bridge”**：保存后页面自动托管并注册到 sub2，不新建容器。取消勾选则走旧的独立容器流程（profiles 列表的“独立容器”按钮）。
+6. 在概览“全部 Mira 账号”确认调度为“已入池”。注册依赖已有的 sub2 管理 Key；同组共享池，不同组隔离调用。
 
 主 bridge 需要运行才能发起/完成新登录。标准 Docker 网络会自动使用 `mirasim-名字:8787`；host 网络必须填写一个未占用的独立端口。已有自定义绑定目录、非标准网络不自动改造；网页会拒绝不支持的拓扑。
 

@@ -55,7 +55,7 @@ test('email profile flow keeps original credentials and config intact; wrong cod
   await assert.rejects(panel.call('login/start', { ...login, profile: 'third' }), /60/);
   await assert.rejects(panel.call('login/complete', { id: begun.id, code: '000000' }), (err) => !err.message.includes('private-token'));
   const result = await panel.call('login/complete', { id: begun.id, code: '123456' });
-  assert.deepEqual(result, { profile: 'second', saved: true });
+  assert.deepEqual(result, { profile: 'second', saved: true, hosted: false, account_name: 'original-second' });
   assert.deepEqual(fs.readFileSync(cfg._config_path), before);
   assert.equal(fs.readFileSync(path.join(dir, 'setting.json'), 'utf8'), 'original-credential');
   const cred = JSON.parse(fs.readFileSync(path.join(dir, 'profiles/second/setting.json')));
@@ -105,7 +105,7 @@ test('panel concurrency settings validate range, persist without env secrets and
   cfg.bridge_secret = 'secret-from-env-only';
   for (const bad of [{ max_concurrency: 0, kimi_max_concurrency: 1 }, { max_concurrency: 17, kimi_max_concurrency: 1 },
     { max_concurrency: 2, kimi_max_concurrency: 3 }, { max_concurrency: '4', kimi_max_concurrency: 1 }]) await assert.rejects(panel.call('settings', bad));
-  assert.deepEqual(await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2 }), { saved: true, max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'observe' });
+  assert.deepEqual(await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2 }), { saved: true, account: 'main', max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'observe' });
   await assert.rejects(panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'always' }), /替换策略/);
   assert.equal((await panel.call('settings', { max_concurrency: 4, kimi_max_concurrency: 2, model_fallback: 'forbid' })).model_fallback, 'forbid');
   assert.equal(JSON.parse(fs.readFileSync(cfg._config_path)).constraints.model_fallback, 'forbid');

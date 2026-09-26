@@ -1,5 +1,22 @@
 # 独立 Mirasim 账号与 sub2api 分组
 
+## 0.8.0：托管到同一个 bridge（推荐）
+
+从 0.8.0 起，多个 Mira 账号**不需要各自一个容器**。主 bridge 同时持有多个账号的凭证，sub2api 里每个账号仍是独立的 `platform=anthropic / type=apikey` 账号，但它们的 `base_url` 都是主 bridge 的地址；sub2api 转发请求时带上该账号的 `api_key`（即该 profile 的 `bridge_secret`），bridge 按这个密钥选择用哪个 Mira 凭证去签名。每个账号有自己的额度快照、调度状态机、并发上限、模型策略和计数。
+
+网页操作：
+
+1. “账号管理 → 新增账号”，填 profile、sub2 账号名、分组 ID，保持“托管到当前 bridge”勾选，用邮箱验证码或 Google 授权完成登录。
+2. 页面会自动托管并注册到 sub2，几秒后在概览的“全部 Mira 账号”里显示为“已入池”（首次可能等 1-2 轮健康检查）。
+3. 顶部“当前账号”选择器或点击一览中的行，可以切换查看/设置某个账号；“暂停调度”会把它立即摘出池子直到手动恢复。
+4. 已经用命令行登录、只保存了凭证的 profile，在 profiles 列表点“托管到当前 bridge”即可。
+
+命令行等价操作：编辑主配置 `/data/config.json` 的 `accounts.hosted`（如 `["second","third"]`）后重启容器；profile 目录必须已有 `setting.json` 和 `config.json`。托管账号会覆盖自身配置里的 `listen`、`sub2api.public_base_url` 和 sub2 管理连接为主配置的值，其余（凭证、`bridge_secret`、`sub2api.account_name`/`group_ids`/`concurrency`、`forward.*`、`constraints.*`）保持 profile 自己的。
+
+限制：托管只在 `backend=relay` 下可用；同一个 profile 不能同时以容器和托管方式运行（会互相覆盖同名 sub2 账号的 base_url）；两个账号的 `bridge_secret` 或 sub2 账号名相同会被拒绝加载。
+
+下面各节是 0.5.0–0.7.x 的独立容器方式，仍然可用，适合需要与主 bridge 进程隔离的场景。
+
 0.7.0 支持用 Google 或邮箱验证码登录第二个 Mirasim 账号。每个 profile 单独保存凭证、设备密钥、bridge_secret、sub2api 账号名，并运行一个 bridge 进程。代码不会调用原账号的退出接口，也不会覆盖原账号或桌面的 setting.json；上游自己的会话政策仍由 Mirasim 决定。
 
 网页后台中的“邮箱验证码”使用客户端实际使用的 `POST /auth/code` → `POST /auth/verify` 流程；它不是 OAuth 回调。输入邮箱后收验证码，再输入验证码完成新 profile 保存。

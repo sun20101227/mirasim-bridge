@@ -1,22 +1,26 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.7.2**，支持网页管理、网络升级接口、独立账号 profile、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.0**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**0.8.0**：多个 Mira 账号共用一个 bridge 地址，网页登录后自动托管并注册到 sub2；网页升级同时更新宿主机后台，不再需要进服务器终端（从 0.7.x 升级需最后一次运行安装器，见 [UPGRADE-0.8.0.md](UPGRADE-0.8.0.md)）；网页新增全部账号一览、按账号暂停/恢复调度。
 
 0.7.2 只对 Claude 模型注入 Claude Code 身份提示词（GPT/Kimi 不再自称 Claude Code），识别 relay 的模型替换，并新增 Codex 专用 openai 账号：[CODEX.md](CODEX.md) · 检测报告 [VERIFY.md](VERIFY.md)。流式排障见 [STREAM-TROUBLESHOOTING.md](STREAM-TROUBLESHOOTING.md)。这不是 OpenAI Chat Completions 转换功能；客户端协议仍需正确配置。
 
 **无需 SSH，在对话或 GitHub 里触发升级：**见 [REMOTE-CONTROL.md](REMOTE-CONTROL.md)。服务器主动读取升级指令，无需公网管理端口。已安装的旧版部署工具需要通过云厂商网页终端/服务器面板更新一次；这里不能凭空接入一个没有远程控制通道的服务器。
 
-专用管理后台：将宿主机 **8790** 反代为 HTTPS 域名，打开 `/panel` 可查看运行状态、真实 Mirasim 额度、模型启停/测试，使用 Google/邮箱验证码添加账号、启动独立容器，并直接升级/回退。先通过网页终端安装一次后台，操作见 [PANEL.md](PANEL.md)。8787 的单 bridge 页面仅提供部分功能。
+专用管理后台：将宿主机 **8790** 反代为 HTTPS 域名，打开 `/panel` 可查看全部账号的调度状态与真实 Mirasim 额度、按账号暂停/恢复、模型启停/测试，使用 Google/邮箱验证码添加账号（默认托管到当前 bridge），并一键升级/回退（含宿主机后台）。先通过网页终端安装一次后台，操作见 [PANEL.md](PANEL.md)。8787 的单 bridge 页面仅提供部分功能。
 
 **以后不想手动上传 ZIP：**见 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md)。一次性安装宿主机部署工具后，可用带独立密钥的 HTTP 接口拉取固定发布源并更新镜像，失败尝试回退。源码与发布入口：[GitHub](https://github.com/sun20101227/mirasim-bridge) · [最新版本](https://github.com/sun20101227/mirasim-bridge/releases/latest)。服务器仍需按说明接入一次。
 
-**已部署 0.4.3 的用户请按 [UPGRADE-0.5.0.md](UPGRADE-0.5.0.md) 更新代码**。新增账号操作见 [ACCOUNTS.md](ACCOUNTS.md)。
+**已部署 0.7.x 的用户请按 [UPGRADE-0.8.0.md](UPGRADE-0.8.0.md) 升级**（更早版本先看 [UPGRADE-0.5.0.md](UPGRADE-0.5.0.md)）。新增账号操作见 [ACCOUNTS.md](ACCOUNTS.md)。
 
 本版参考 [KIDA-MNESIA/cpa-plugin-mirasim](https://github.com/KIDA-MNESIA/cpa-plugin-mirasim) 移植了设备签名、加密元数据、票据缓存、token 刷新、GPT Responses/compact 和额度查询，见 [RELAY.md](RELAY.md) 与 [许可说明](THIRD-PARTY-NOTICES.md)。
 
 **保持原版、使用配套容器请读 [DOCKER.md](DOCKER.md)**；原生 systemd 部署见 [DEPLOY.md](DEPLOY.md)。变更记录见 [CHANGELOG.md](CHANGELOG.md)。[DESIGN.md](DESIGN.md) 保留历史实验，运行方式与默认参数以本 README、示例配置和当前代码为准。
 
 ## 验证范围
+
+0.8.0：120 项 Node 测试（含 6 项托管账号：密钥路由、各账号独立设备签名与计数、面板托管/移出/暂停、配置写入各自文件）、67 项自测、41 项 Python 测试（含 6 项宿主机自更新：镜像内文件校验、备份与回退、语法错误拒装、失败不触碰宿主机）。桌面/手机/深色截图通过。真实多账号注册与服务器上的宿主机自更新仍需验收。
 
 0.6.0 延续 82 项 Node 回归和 67 项自测，新增 8 项 Python 网络部署测试，覆盖接口鉴权、固定镜像摘要、部署失败回退及中断恢复。部署/回退操作由 mock 验证；GitHub Ubuntu 发布已通过测试，完成 amd64/arm64 构建与 amd64 容器离线自测，镜像支持匿名拉取。宿主机部署及生产容器升级仍需服务器验收。
 

@@ -211,3 +211,29 @@ dialog p{font-size:12px}
 th.actions{text-align:right}
 .family b{text-transform:none}
 .warn-text{color:var(--warn);margin:14px 0 0}
+/* 0.8.0: account picker, fleet list, mini quota */
+.picker{flex-direction:row;align-items:center;gap:8px;font-size:12px;color:var(--muted);white-space:nowrap}
+.picker select{width:auto;min-width:150px;padding:7px 10px}
+.fleet{display:grid;gap:8px}
+.fleet-row{display:grid;grid-template-columns:minmax(160px,1.3fr) minmax(120px,1fr) minmax(150px,1.2fr) minmax(110px,.9fr);gap:14px;align-items:center;text-align:left;background:var(--surface-2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-weight:400;transition:border-color .15s,background .15s}
+.fleet-row:hover{background:var(--surface-2);border-color:var(--accent)}
+.fleet-row.current{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.fleet-name{display:flex;flex-direction:column;gap:2px;min-width:0}
+.fleet-name b{font-weight:650;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+.fleet-name .hint{overflow-wrap:anywhere}
+.fleet-state{display:flex;gap:6px;flex-wrap:wrap}
+.fleet-load b{font-size:18px;font-weight:650;font-variant-numeric:tabular-nums;display:block;line-height:1.2}
+.fleet-load .hint{display:block}
+.quota-mini{display:grid;gap:6px;min-width:0}
+.mini-line{display:grid;grid-template-columns:auto auto;gap:2px 8px;align-items:center;font-size:12px;color:var(--muted)}
+.mini-line b{font-variant-numeric:tabular-nums;text-align:right;color:var(--text)}
+.mini-line .meter{grid-column:1/-1;height:5px}
+.mini-line[data-level="warn"] .meter i{background:var(--warn)}.mini-line[data-level="bad"] .meter i{background:var(--bad)}
+.mini-line[data-level="warn"] b{color:var(--warn)}.mini-line[data-level="bad"] b{color:var(--bad)}
+label.check{flex-direction:row;align-items:center;gap:8px;grid-column:1/-1;color:var(--text);font-weight:500}
+label.check input{width:auto}
+#account-actions{align-items:center}
+@media(max-width:1000px){.fleet-row{grid-template-columns:1fr 1fr}.fleet-load{display:none}}
+@media(max-width:700px){.picker{width:100%}.picker select{flex:1}.fleet-row{grid-template-columns:1fr;gap:8px;padding:12px}.profile-row .row{width:100%}}
+.fleet-row{white-space:normal}
+.fleet-row .pill{white-space:nowrap}

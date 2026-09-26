@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css')}
-OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status'}
+OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume'}
 
 
 def command_input(args, data, timeout=55):
@@ -86,6 +87,9 @@ class Console:
             raise ValueError('Invalid profile name')
         if self.target(profile):
             raise ValueError('Profile target already exists')
+        if data.get('hosted') is True:
+            # Hosted in the main bridge process: same base_url, told apart by its own secret.
+            return {**{k: v for k, v in data.items() if k not in ('port', 'public_base_url')}, 'profile': profile, 'hosted': True}
         _, network = self.topology()
         port = 8787 if network else data.get('port')
         if type(port) is not int or not 1024 <= port <= 65535:
@@ -182,7 +186,7 @@ class Console:
                 if op == 'login/start':
                     data = self.login_options(data)
                 result = self.bridge(self.target(name), op, data)
-            if op not in {'status', 'summary', 'models', 'profiles', 'groups', 'login/status'}:
+            if op not in {'status', 'summary', 'models', 'profiles', 'groups', 'login/status', 'accounts'}:
                 self.audit(op, name, True)
             return result
         except Exception:

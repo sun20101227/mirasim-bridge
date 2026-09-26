@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.7.2';
+const VERSION = '0.8.0';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -65,6 +65,9 @@ const DEFAULT_CONFIG = {
     openai_account: { enabled: false, account_name: '', group_ids: [] },
   },
   bridge_secret: '',
+  // 同一 bridge 托管多个 Mira 账号（0.8.0）：每个 profile 用自己的 bridge_secret 区分，
+  // sub2api 里各自一个账号、同一个 base_url。只在 backend=relay 下可用。
+  accounts: { hosted: [] },
   quota: { enabled: true, interval_sec: 300, sync_notes: true },
   diagnostics: { timeout_sec: 30, max_tokens: 128 },
   health: { interval_sec: 30, fail_threshold: 2, success_threshold: 2, min_dwell_sec: 60 },
@@ -279,6 +282,10 @@ function validateConfig(cfg) {
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
   if (!Number.isInteger(cfg.diagnostics.timeout_sec) || cfg.diagnostics.timeout_sec < 1 || cfg.diagnostics.timeout_sec > 600 || !Number.isInteger(cfg.diagnostics.max_tokens) || cfg.diagnostics.max_tokens < 1 || cfg.diagnostics.max_tokens > 8192) throw new Error('diagnostics 超时/输出预算无效');
   if (!Number.isInteger(cfg.constraints.default_max_tokens) || cfg.constraints.default_max_tokens < 1) throw new Error('default_max_tokens 必须是正整数');
+  const hosted = cfg.accounts.hosted;
+  if (!Array.isArray(hosted) || hosted.some((n) => typeof n !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/.test(n) || n === 'main')
+      || new Set(hosted).size !== hosted.length) throw new Error('accounts.hosted 必须是不重复的 profile 名数组（小写字母开头，不能是 main）');
+  if (hosted.length && cfg.backend !== 'relay') throw new Error('accounts.hosted 需要 backend=relay');
 }
 
 const relayClients = new WeakMap();
@@ -1566,6 +1573,144 @@ function bridgeBaseUrl(cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// 3g2. 多账号托管（0.8.0）：一个 bridge、一个 base_url，按 sub2api 出示的密钥区分 Mira 账号
+//
+// 每个账号是一对 (cfg, ctx)：cfg 决定凭证文件、sub2api 账号名/分组、并发与模型策略，
+// ctx 保存计数、在途、退避、额度和调度状态机。转发层/健康循环/额度同步都只认这一对，
+// 所以 main 与托管 profile 走完全相同的代码路径，区别只在入站密钥匹配到哪个账号。
+// ---------------------------------------------------------------------------
+
+function newAccountCtx(key) {
+  return {
+    key,
+    keepalive: null,
+    codex: { sm: null, reachable: false },
+    sm: null,
+    reachable: false,
+    hold: false,                // 网页手动暂停：健康循环不会把它恢复进池
+    inflight: 0,
+    kimiInflight: 0,
+    counters: {
+      total: 0, ok: 0, err: 0, rejected: 0, injected: 0,
+      sampling_retried: 0,
+      cc_retried: 0,            // 非 Claude 模型未带身份块被拒、注入后重试的次数
+      fallback: 0,              // relay 用其他模型顶替本轮的次数（响应 model 与请求不同）
+      models_filtered: 0,       // /v1/models 响应里被白名单/黑名单滤掉的模型数
+      sanitized: {},            // 约束清洗动作计数，键见 sanitizeMessagesRequest 的 notes
+    },
+    backoffUntil: 0,
+    startedAt: Date.now(),
+  };
+}
+
+function configRoot(cfg) {
+  return path.dirname(path.resolve(cfg._config_path || path.join(__dirname, 'config.json')));
+}
+
+/**
+ * 读取 profiles/<name>/config.json 并叠加 main 的“共享部分”：监听地址、sub2api 管理连接、
+ * 对外 base_url。profile 自己保留：凭证文件、bridge_secret、sub2api 账号名/分组/并发、模型策略。
+ */
+function loadHostedAccount(mainCfg, name) {
+  const { profileDirectory } = require('./lib/login');
+  const dir = profileDirectory(configRoot(mainCfg), name);
+  const cfgFile = path.join(dir, 'config.json');
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')); }
+  catch { throw new Error(`profile ${name} 的 config.json 缺失或不是有效 JSON`); }
+  if (!isPlainObject(raw)) throw new Error(`profile ${name} 的配置必须是对象`);
+  const cfg = deepMerge(deepMerge({}, DEFAULT_CONFIG), raw);
+  cfg._config_path = cfgFile;
+  cfg.backend = 'relay';
+  cfg.keepalive.enabled = false;
+  cfg.accounts = { hosted: [] };
+  cfg.listen = { ...mainCfg.listen };
+  cfg.sub2api.base_url = mainCfg.sub2api.base_url;
+  cfg.sub2api.admin_api_key = mainCfg.sub2api.admin_api_key;
+  if (mainCfg.sub2api.jwt) cfg.sub2api.jwt = mainCfg.sub2api.jwt;
+  cfg.sub2api.public_base_url = mainCfg.sub2api.public_base_url;
+  validateConfig(cfg);
+  if (!cfg.bridge_secret.trim()) throw new Error(`profile ${name} 没有 bridge_secret`);
+  if (!fs.existsSync(relaySettingPath(cfg))) throw new Error(`profile ${name} 尚未保存凭证（setting.json）`);
+  if (cfg.sub2api.account_name === mainCfg.sub2api.account_name) throw new Error(`profile ${name} 的 sub2api 账号名与主账号相同`);
+  return { key: name, cfg, ctx: newAccountCtx(name) };
+}
+
+class AccountHub {
+  constructor(mainCfg, mainCtx) {
+    this.mainCfg = mainCfg;
+    this.mainCtx = mainCtx;
+    mainCtx.key = 'main';
+    mainCtx.hub = this;
+    this.accounts = new Map([['main', { key: 'main', cfg: mainCfg, ctx: mainCtx }]]);
+  }
+  all() { return [...this.accounts.values()]; }
+  get(key) { return this.accounts.get(key) || null; }
+  get main() { return this.accounts.get('main'); }
+  inflight() { return this.all().reduce((n, a) => n + a.ctx.inflight, 0); }
+  /** 入站密钥 → 账号；逐个定长比较，账号数很小 */
+  find(presented) {
+    if (!presented) return null;
+    for (const a of this.all()) if (secretMatches(presented, a.cfg.bridge_secret)) return a;
+    return null;
+  }
+  add(name) {
+    if (this.accounts.has(name)) throw new Error(`账号 ${name} 已在托管中`);
+    const acct = loadHostedAccount(this.mainCfg, name);
+    for (const other of this.all()) {
+      if (secretMatches(acct.cfg.bridge_secret, other.cfg.bridge_secret)) throw new Error(`profile ${name} 的 bridge_secret 与 ${other.key} 重复，无法区分`);
+      if (acct.cfg.sub2api.account_name === other.cfg.sub2api.account_name) throw new Error(`profile ${name} 的 sub2api 账号名与 ${other.key} 重复`);
+    }
+    const main = this.mainCtx;
+    Object.defineProperty(acct.ctx, 'shuttingDown', { get: () => Boolean(main.shuttingDown), enumerable: false });
+    acct.ctx.hub = this;
+    this.accounts.set(name, acct);
+    return acct;
+  }
+  remove(name) {
+    if (name === 'main') throw new Error('不能移除主账号');
+    const acct = this.accounts.get(name);
+    if (!acct) return null;
+    this.accounts.delete(name);
+    return acct;
+  }
+}
+
+/** 一个账号的运行摘要（/__status、网页后台共用；不含密钥、不含凭证） */
+function accountSummary(acct) {
+  const { cfg, ctx } = acct;
+  let relay = null;
+  if (cfg.backend === 'relay') { try { relay = getRelay(cfg); } catch { /* 凭证暂不可读：只影响 ready 显示 */ } }
+  return {
+    key: acct.key,
+    account_name: cfg.sub2api.account_name,
+    group_ids: cfg.sub2api.group_ids,
+    max_concurrency: cfg.forward.max_concurrency,
+    kimi_max_concurrency: cfg.forward.kimi_max_concurrency,
+    model_fallback: cfg.constraints.model_fallback,
+    disabled_models: cfg.constraints.disabled_models,
+    relay: relay ? { ready: relay.ready } : undefined,
+    quota: ctx.quota || { available: false, stale: true },
+    sub2api: {
+      managed: Boolean(ctx.sm),
+      reachable: Boolean(ctx.reachable),
+      schedulable: ctx.sm ? ctx.sm.desired : 'unmanaged',
+      account_id: ctx.sm?.accountId || null,
+    },
+    sub2api_codex: ctx.codex?.sm ? { managed: true, reachable: Boolean(ctx.codex.reachable), schedulable: ctx.codex.sm.desired, account_id: ctx.codex.sm.accountId } : { managed: false },
+    hold: Boolean(ctx.hold),
+    healthy: Boolean(ctx.lastHealthy),
+    inflight: ctx.inflight,
+    kimi_inflight: ctx.kimiInflight || 0,
+    backoff_sec_left: Math.max(0, Math.ceil(((ctx.backoffUntil || 0) - Date.now()) / 1000)),
+    counters: ctx.counters,
+    last_stream_error: ctx.lastStreamError || null,
+    last_fallback: ctx.lastFallback || null,
+    started_at: new Date(ctx.startedAt).toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 3h. 调度状态机（DESIGN.md §5）
 // ---------------------------------------------------------------------------
 
@@ -1750,7 +1895,7 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
   const replayLimit = cfg.forward.replay_buffer_mb * 1024 * 1024;
 
   const server = http.createServer(async (req, res) => {
-    ctx.counters.total++;
+    if (!ctx.hub) ctx.counters.total++;
 
     // The HTML shell contains no account data; its API calls use panel key auth.
     if (req.url === '/panel' || req.url.startsWith('/panel/')) return require('./lib/panel').page(res, req.url);
@@ -1760,41 +1905,53 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
     }
 
     // --- 入站鉴权（§8）---
-    if (secret && !secretMatches(presentedKey(req), secret)) {
+    // 多账号托管：密钥决定是哪个 Mira 账号。匹配不到任何账号一律 503（不是 403，见 fail503 注释）。
+    let acct = { cfg, ctx };
+    if (ctx.hub) {
+      const hit = ctx.hub.find(presentedKey(req));
+      if (!hit) {
+        ctx.counters.total++;
+        ctx.counters.rejected++;
+        return fail503(res, 'bridge_secret mismatch');
+      }
+      acct = hit;
+      acct.ctx.counters.total++;
+    } else if (secret && !secretMatches(presentedKey(req), secret)) {
       ctx.counters.rejected++;
       return fail503(res, 'bridge_secret mismatch');   // 不是 403：见 fail503 注释
     }
     if (ctx.shuttingDown) return fail503(res, 'shutting down');
     if (req.url.startsWith('/__')) {
       try {
-        return handleInternal(req, res, cfg, ctx);
+        return handleInternal(req, res, acct.cfg, acct.ctx);
       }
       catch { return fail503(res, 'status unavailable'); }
     }
+    const { cfg: acfg, ctx: actx } = acct;
 
     // --- 并发闸门 --- 读当前配置：网页后台可在运行中调整上限
-    const limit = Math.max(1, cfg.forward.max_concurrency);
-    agent.maxSockets = Math.max(4, limit * 2);
-    if (ctx.inflight >= limit) {
-      ctx.counters.rejected++;
+    const limit = Math.max(1, acfg.forward.max_concurrency);
+    agent.maxSockets = Math.max(agent.maxSockets, 4, limit * 2);
+    if (actx.inflight >= limit) {
+      actx.counters.rejected++;
       return fail503(res, `over concurrency limit (${limit})`);
     }
 
     // --- 退避期 ---
-    if (Date.now() < ctx.backoffUntil) {
-      ctx.counters.rejected++;
-      const left = Math.ceil((ctx.backoffUntil - Date.now()) / 1000);
+    if (Date.now() < actx.backoffUntil) {
+      actx.counters.rejected++;
+      const left = Math.ceil((actx.backoffUntil - Date.now()) / 1000);
       return fail503(res, `backing off for ${left}s after upstream rate limit`);
     }
 
-    ctx.inflight++;
+    actx.inflight++;
     try {
-      await handleProxy(req, res, cfg, ctx, agent, replayLimit);
+      await handleProxy(req, res, acfg, actx, agent, replayLimit);
     } catch (err) {
-      ctx.counters.err++;
+      actx.counters.err++;
       fail503(res, `forward failed: ${err.message}`);
     } finally {
-      ctx.inflight--;
+      actx.inflight--;
     }
   });
 
@@ -1855,6 +2012,10 @@ function handleInternal(req, res, cfg, ctx) {
       kimi_inflight: ctx.kimiInflight || 0,
       backoff_sec_left: Math.max(0, Math.ceil((ctx.backoffUntil - Date.now()) / 1000)),
       counters: ctx.counters,
+      account: ctx.key || 'main',
+      hold: Boolean(ctx.hold),
+      // 0.8.0：同一 bridge 托管的全部账号（含本账号），供网页后台与 status 命令使用
+      accounts: ctx.hub ? ctx.hub.all().map(accountSummary) : undefined,
     }, null, 2);
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(body);
@@ -2942,6 +3103,8 @@ function createShutdownHandler(cfg, ctx, { server, registration, stopHealth, exi
   let started = false, finished = false, deadlineTimer;
   let resolveDone;
   const done = new Promise((r) => { resolveDone = r; });
+  const accounts = () => (ctx.hub ? ctx.hub.all() : [{ cfg, ctx }]);
+  const inflight = () => accounts().reduce((n, a) => n + a.ctx.inflight, 0);
   const finish = (forced) => {
     if (finished) return;
     finished = true;
@@ -2965,13 +3128,127 @@ function createShutdownHandler(cfg, ctx, { server, registration, stopHealth, exi
     deadlineTimer = setTimeout(() => finish(true), cfg.shutdown.total_timeout_sec * 1000);
     await Promise.race([Promise.resolve().then(registration).catch(() => {}), done]);
     if (finished) return;
-    const pauses = [ctx.sm, ctx.codex?.sm].filter(Boolean).map((sm) => sm.pause('优雅退出').catch((e) => warn(`PAUSE 失败：${e.message}`)));
+    // 先把所有托管账号摘出池子，再排空在途请求
+    const pauses = accounts().flatMap((a) => [a.ctx.sm, a.ctx.codex?.sm].filter(Boolean)
+      .map((sm) => sm.pause('优雅退出').catch((e) => warn(`[${a.key || 'main'}] PAUSE 失败：${e.message}`))));
     if (pauses.length) await Promise.race([Promise.all(pauses), done]);
     if (finished) return;
     const drainUntil = Date.now() + cfg.shutdown.drain_timeout_sec * 1000;
-    while (!finished && ctx.inflight > 0 && Date.now() < drainUntil) await Promise.race([new Promise((r) => setTimeout(r, 100)), done]);
-    finish(ctx.inflight > 0);
+    while (!finished && inflight() > 0 && Date.now() < drainUntil) await Promise.race([new Promise((r) => setTimeout(r, 100)), done]);
+    finish(inflight() > 0);
   };
+}
+
+/** 一个账号的 sub2api 注册（主账号 + 可选 Codex 账号）。可重复调用：已注册的部分跳过。 */
+async function registerHubAccount(acct, args) {
+  const { cfg, ctx } = acct;
+  const tag = `[${acct.key}]`;
+  const codexAccount = managedAccounts(cfg).find((a) => a.key === 'codex');
+  if (cfg.sub2api.openai_account?.enabled && !codexAccount && !ctx.codexWarned) {
+    ctx.codexWarned = true;
+    warn(`${tag} openai_account 需要 backend=relay（Responses 只在直连 relay 时可用），已跳过 Codex 账号。`);
+  }
+  if (!ctx.sm && !ctx.shuttingDown) {
+    try {
+      // 先 listen 再注册：sync-upstream 会打回桥接器，端口没开这步必失败
+      const reg = await cmdRegister(cfg, args);
+      if (reg && reg.id) {
+        ctx.sm = new ScheduleState(cfg, reg.id);
+        ctx.reachable = Boolean(reg.reachable);
+        log(`${tag} 调度状态机就绪 account_id=${reg.id}，desired=unknown（先探测，不预设）`);
+        if (!ctx.reachable) warn(`${tag} sub2api 够不着桥接器，账号将保持暂停——健康循环会定期重试 sync-upstream。`);
+      }
+    } catch (err) {
+      warn(`${tag} sub2api 注册失败：${err.message}`);
+      warn(`${tag} 转发层照常工作，但账号不会自动进出池。修好后可单独跑 register。`);
+    }
+  }
+  if (codexAccount && !ctx.codex.sm && !ctx.shuttingDown) {
+    try {
+      const reg = await cmdRegister(cfg, args, codexAccount);
+      if (reg && reg.id) {
+        ctx.codex.sm = new ScheduleState(cfg, reg.id);
+        ctx.codex.reachable = Boolean(reg.reachable);
+        log(`${tag} Codex 账号状态机就绪 account_id=${reg.id}（platform=openai）`);
+      }
+    } catch (err) {
+      warn(`${tag} Codex 账号注册失败：${err.message}`);
+    }
+  }
+}
+
+/**
+ * 一个账号的健康 tick。健康要两个方向都成立，缺一不可：
+ *   正向 桥接器 → Mirasim   每 tick 探
+ *   反向 sub2api → 桥接器   由 sync-upstream 证明，失败时定期重试（别每 tick 打，太吵）
+ * 只探正向是不够的：本机一切正常、而 sub2api 根本连不上桥接器时，
+ * 状态机会把一个不可达的账号 RESUME 进池，直接产生用户可见的 5xx。
+ */
+async function accountHealthTick(acct, { tickCount, withSub2api, args, recheckEvery }) {
+  const { cfg, ctx } = acct;
+  const tag = `[${acct.key}]`;
+  const codexAccount = managedAccounts(cfg).find((a) => a.key === 'codex');
+  try {
+    if (withSub2api && (!ctx.sm || (codexAccount && !ctx.codex.sm)) && tickCount % recheckEvery === 0) {
+      await registerHubAccount(acct, args);
+      if (ctx.shuttingDown) return;
+    }
+    const t = resolveTarget(cfg, {
+      preferPid: ctx.keepalive ? ctx.keepalive.pid : null, maxAgeMs: 0,
+      strict: Boolean(ctx.keepalive),
+    });
+    let forwardOk = false;
+    if (t) {
+      const probe = await probeUpstream(t, '/v1/models', cfg);
+      forwardOk = probe.status === 200 && probe.modelCount > 0;
+      if (ctx.keepalive && t.is_keepalive && [401, 403].includes(probe.status)) ctx.keepalive.noteUpstreamAuthFail();
+      if (!forwardOk) warn(`${tag} 健康探测失败 HTTP ${probe.status} ${probe.error || ''}`);
+    } else {
+      warn(`${tag} 健康探测：没有可用的 agent 会话`);
+    }
+
+    // 反向可达性：只在还没通过时定期重试
+    if (ctx.sm && forwardOk && (!ctx.reachable || tickCount % recheckEvery === 0)) {
+      try {
+        const synced = await syncAccountModels(cfg, ctx.sm.accountId, {
+          beforeWrite: () => ctx.sm.pause('更新上游模型映射'),
+        });
+        const list = synced.models;
+        if (list.length && !ctx.reachable) log(`${tag} 反向可达性恢复：sub2api 已能打通桥接器（模型 ${list.length} 个）`);
+        ctx.reachable = list.length > 0;
+      } catch (err) {
+        ctx.reachable = false;
+        log(`${tag} 反向可达性仍未通过：${err.message}`);
+      }
+    }
+
+    const codex = ctx.codex;
+    if (codex.sm && forwardOk && (!codex.reachable || tickCount % recheckEvery === 0)) {
+      try {
+        const synced = await syncAccountModels(cfg, codex.sm.accountId, {
+          account: codexAccount, beforeWrite: () => codex.sm.pause('更新 Codex 模型映射'),
+        });
+        codex.reachable = synced.models.length > 0;
+      } catch (err) {
+        codex.reachable = false;
+        log(`${tag} Codex 账号反向可达性未通过：${err.message}`);
+      }
+    }
+
+    if (ctx.shuttingDown) return;
+    try { await refreshQuota(cfg, ctx); } catch (err) { warn(`${tag} 额度备注同步失败：${err.message}`); }
+    if (ctx.shuttingDown) return;
+    const base = forwardOk && Date.now() >= ctx.backoffUntil && !ctx.hold;
+    const healthy = base && ctx.reachable && (!ctx.keepalive || ctx.keepalive.ready);
+    ctx.lastHealthy = healthy;
+    if (ctx.sm) await ctx.sm.onProbe(healthy);
+    if (codex.sm) await codex.sm.onProbe(base && codex.reachable);
+  } catch (err) {
+    warn(`${tag} 健康循环异常：${err.message}`);
+    ctx.lastHealthy = false;
+    if (ctx.sm && !ctx.shuttingDown) await ctx.sm.onProbe(false);
+    if (ctx.codex.sm && !ctx.shuttingDown) await ctx.codex.sm.onProbe(false);
+  }
 }
 
 async function cmdServe(cfg, args) {
@@ -2983,29 +3260,19 @@ async function cmdServe(cfg, args) {
   if (!secret.trim()) throw new Error('必须配置非空 bridge_secret（包括回环监听），防止经反代暴露无鉴权接口');
   const maxConc = Math.max(1, cfg.forward.max_concurrency);
 
-  const ctx = {
-    keepalive: null,
-    codex: { sm: null, reachable: false },
-    inflight: 0,
-    queue: [],
-    counters: {
-      total: 0, ok: 0, err: 0, rejected: 0, injected: 0,
-      sampling_retried: 0,
-      cc_retried: 0,            // 非 Claude 模型未带身份块被拒、注入后重试的次数
-      fallback: 0,              // relay 用其他模型顶替本轮的次数（响应 model 与请求不同）      // 采样参数被上游拒后剥离重试成功的次数（§1.2）
-      models_filtered: 0,       // /v1/models 响应里被白名单/黑名单滤掉的模型数
-      sanitized: {},            // 约束清洗动作计数，键见 sanitizeMessagesRequest 的 notes
-    },
-    backoffUntil: 0,
-    startedAt: Date.now(),
-  };
-
+  const ctx = newAccountCtx('main');
+  const hub = new AccountHub(cfg, ctx);
   const withSub2api = Boolean(cfg.sub2api.base_url && (cfg.sub2api.admin_api_key || cfg.sub2api.jwt))
     && !args.flags['no-register'];
+  hub.withSub2api = withSub2api;
 
   if (cfg.backend === 'relay') {
     getRelay(cfg);
     log('直连 relay 模式：不启动 Mirasim 后端或 Claude 保活会话');
+    for (const name of cfg.accounts.hosted) {
+      try { hub.add(name); log(`托管账号 ${name} 已加载（sub2api 账号 ${hub.get(name).cfg.sub2api.account_name}）`); }
+      catch (err) { warn(`托管账号 ${name} 加载失败，已跳过：${err.message}`); }
+    }
   } else if (cfg.keepalive.enabled) {
     ctx.keepalive = new KeepaliveSupervisor(cfg, {
       onDown: () => {
@@ -3036,61 +3303,33 @@ async function cmdServe(cfg, args) {
     throw err;
   }
   log(`桥接器监听 http://${host}:${port}`);
-  log(secret ? '入站鉴权：已启用（x-api-key）' : '⚠️ 入站鉴权：未启用（bridge_secret 为空）');
+  log(`入站鉴权：已启用（x-api-key / Bearer），账号 ${hub.all().length} 个：${hub.all().map((a) => a.key).join('、')}`);
   log(`并发上限 ${maxConc}（保守起步，观察稳定后再调）`);
   if (cfg.backend === 'relay') {
-    const probe = await probeUpstream(resolveTarget(cfg), '/v1/models', cfg);
-    log(`relay 初始探测 HTTP ${probe.status}，模型 ${probe.modelCount} 个`);
+    for (const acct of hub.all()) {
+      const probe = await probeUpstream(resolveTarget(acct.cfg), '/v1/models', acct.cfg);
+      log(`[${acct.key}] relay 初始探测 HTTP ${probe.status}，模型 ${probe.modelCount} 个`);
+    }
   }
   if (ctx.shuttingDown) return;
 
-  // --- sub2api 接入 ---
-  const codexAccount = managedAccounts(cfg).find((a) => a.key === 'codex');
-  if (cfg.sub2api.openai_account?.enabled && !codexAccount) warn('openai_account 需要 backend=relay（Responses 只在直连 relay 时可用），已跳过 Codex 账号。');
-  const registerCodex = async () => {
-    if (!codexAccount || ctx.codex.sm || ctx.shuttingDown) return;
-    try {
-      const reg = await cmdRegister(cfg, args, codexAccount);
-      if (reg && reg.id) {
-        ctx.codex.sm = new ScheduleState(cfg, reg.id);
-        ctx.codex.reachable = Boolean(reg.reachable);
-        log(`Codex 账号状态机就绪 account_id=${reg.id}（platform=openai）`);
-      }
-    } catch (err) {
-      warn(`Codex 账号注册失败：${err.message}`);
+  // --- sub2api 接入：逐账号注册；网页后台新增托管账号时也走这里 ---
+  const registerAll = async () => {
+    if (!withSub2api) { log('未接入 sub2api（缺 base_url/admin_api_key 或指定了 --no-register）'); return; }
+    for (const acct of hub.all()) {
+      if (ctx.shuttingDown) return;
+      await registerHubAccount(acct, args);
     }
   };
-  const registerAccount = async () => {
-  if (withSub2api) {
-    try {
-      // 先 listen 再注册：sync-upstream 会打回桥接器，端口没开这步必失败
-      const reg = await cmdRegister(cfg, args);
-      if (reg && reg.id) {
-        ctx.sm = new ScheduleState(cfg, reg.id);
-        ctx.reachable = Boolean(reg.reachable);
-        log(`调度状态机就绪 account_id=${reg.id}，desired=unknown（先探测，不预设）`);
-        if (!ctx.reachable) {
-          warn('sub2api 够不着桥接器，账号将保持暂停——健康循环会定期重试 sync-upstream。');
-        }
-      }
-    } catch (err) {
-      warn(`sub2api 注册失败：${err.message}`);
-      warn('转发层照常工作，但账号不会自动进出池。修好后可单独跑 `register`。');
-    }
-    await registerCodex();
-  } else {
-    log('未接入 sub2api（缺 base_url/admin_api_key 或指定了 --no-register）');
-  }
+  hub.registerAccount = async (acct) => {
+    if (!withSub2api) return;
+    await registration.catch(() => {});
+    registration = registerHubAccount(acct, args);
+    await registration;
+    try { await refreshQuota(acct.cfg, acct.ctx, { force: true }); } catch (err) { warn(`[${acct.key}] 额度备注同步失败：${err.message}`); }
+  };
 
   // --- 健康循环 ---
-  //
-  // 健康要两个方向都成立，缺一不可：
-  //   正向 桥接器 → Mirasim   每 tick 探
-  //   反向 sub2api → 桥接器   由 sync-upstream 证明，失败时定期重试（别每 tick 打，太吵）
-  // 只探正向是不够的：本机一切正常、而 sub2api 根本连不上桥接器时，
-  // 状态机会把一个不可达的账号 RESUME 进池，直接产生用户可见的 5xx。
-  };
-
   let running = false;             // 重叠保护：慢 tick 不叠加
   let tickCount = 0;
   const RECHECK_EVERY = 10;        // 不可达时每 10 个 tick 重试一次反向验证
@@ -3099,80 +3338,21 @@ async function cmdServe(cfg, args) {
     running = true;
     tickCount++;
     try {
-      if (withSub2api && !ctx.sm && tickCount % RECHECK_EVERY === 0) {
-        await registration;
-        if (ctx.shuttingDown) return;
-        registration = registerAccount();
-        await registration;
-      } else if (withSub2api && ctx.sm && codexAccount && !ctx.codex.sm && tickCount % RECHECK_EVERY === 0) {
-        await registerCodex();
+      await registration.catch(() => {});
+      for (const acct of hub.all()) {
+        if (ctx.shuttingDown) break;
+        await accountHealthTick(acct, { tickCount, withSub2api, args, recheckEvery: RECHECK_EVERY });
       }
-      const t = resolveTarget(cfg, {
-        preferPid: ctx.keepalive ? ctx.keepalive.pid : null, maxAgeMs: 0,
-        strict: Boolean(ctx.keepalive),
-      });
-      let forwardOk = false;
-      if (t) {
-        const probe = await probeUpstream(t, '/v1/models', cfg);
-        forwardOk = probe.status === 200 && probe.modelCount > 0;
-        if (ctx.keepalive && t.is_keepalive && [401, 403].includes(probe.status)) ctx.keepalive.noteUpstreamAuthFail();
-        if (!forwardOk) warn(`健康探测失败 HTTP ${probe.status} ${probe.error || ''}`);
-      } else {
-        warn('健康探测：没有可用的 agent 会话');
-      }
-
-      // 反向可达性：只在还没通过时定期重试
-      if (ctx.sm && forwardOk && (!ctx.reachable || tickCount % RECHECK_EVERY === 0)) {
-        try {
-          const synced = await syncAccountModels(cfg, ctx.sm.accountId, {
-            beforeWrite: () => ctx.sm.pause('更新上游模型映射'),
-          });
-          const list = synced.models;
-          ctx.reachable = list.length > 0;
-          if (list.length) {
-            ctx.reachable = true;
-            log(`反向可达性恢复：sub2api 已能打通桥接器（模型 ${list.length} 个）`);
-          }
-        } catch (err) {
-          ctx.reachable = false;
-          log(`反向可达性仍未通过：${err.message}`);
-        }
-      }
-
-      const codex = ctx.codex;
-      if (codex.sm && forwardOk && (!codex.reachable || tickCount % RECHECK_EVERY === 0)) {
-        try {
-          const synced = await syncAccountModels(cfg, codex.sm.accountId, {
-            account: codexAccount, beforeWrite: () => codex.sm.pause('更新 Codex 模型映射'),
-          });
-          codex.reachable = synced.models.length > 0;
-        } catch (err) {
-          codex.reachable = false;
-          log(`Codex 账号反向可达性未通过：${err.message}`);
-        }
-      }
-
-      if (ctx.shuttingDown) return;
-      try { await refreshQuota(cfg, ctx); } catch (err) { warn(`额度备注同步失败：${err.message}`); }
-      if (ctx.shuttingDown) return;
-      const healthy = forwardOk && ctx.reachable && Date.now() >= ctx.backoffUntil
-        && (!ctx.keepalive || ctx.keepalive.ready);
-      ctx.lastHealthy = healthy;
-      if (ctx.sm) await ctx.sm.onProbe(healthy);
-      if (codex.sm) await codex.sm.onProbe(forwardOk && codex.reachable && Date.now() >= ctx.backoffUntil);
-    } catch (err) {
-      warn(`健康循环异常：${err.message}`);
-      ctx.lastHealthy = false;
-      if (ctx.sm && !ctx.shuttingDown) await ctx.sm.onProbe(false);
-      if (ctx.codex.sm && !ctx.shuttingDown) await ctx.codex.sm.onProbe(false);
     } finally {
       running = false;
     }
   }, cfg.health.interval_sec * 1000);
 
-  registration = registerAccount();
+  registration = registerAll();
   await registration;
-  try { await refreshQuota(cfg, ctx, { force: true }); } catch (err) { warn(`额度备注同步失败：${err.message}`); }
+  for (const acct of hub.all()) {
+    try { await refreshQuota(acct.cfg, acct.ctx, { force: true }); } catch (err) { warn(`[${acct.key}] 额度备注同步失败：${err.message}`); }
+  }
 }
 
 async function cmdGroups(cfg, args) {
@@ -3691,7 +3871,7 @@ async function main() {
 }
 
 if (require.main === module) main().catch((err) => fatal(err && err.stack ? err.stack : String(err)));
-module.exports = { managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
+module.exports = { bridgeBaseUrl, AccountHub, newAccountCtx, accountSummary, loadHostedAccount, configRoot, registerHubAccount, accountHealthTick, managedAccounts, sameModel, needsCCIdentity, noteServedModel, VERSION, DEFAULT_CONFIG, deepMerge, validateConfig, resolveAgentEnv, resolveTarget,
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
   modelFamily, isModelAllowed, summarizeModelResponse, diagnosticTarget, diagnosticRequest,

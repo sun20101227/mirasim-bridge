@@ -29,7 +29,8 @@ $sourceFiles = @(
     'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md', 'PANEL.md',
     'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css',
     'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
-    'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js'
+    'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js',
+    'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

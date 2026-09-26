@@ -21,6 +21,9 @@ scripts/**
 !scripts/healthcheck.js
 !scripts/account-login.js
 !scripts/panel-bridge.js
+!scripts/deploy-agent.py
+!scripts/panel-host.py
+!scripts/install-panel.py
 !THIRD-PARTY-NOTICES.md
 !licenses/
 licenses/**
