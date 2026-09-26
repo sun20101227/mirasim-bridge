@@ -138,6 +138,17 @@ test('connection checks use each real bridge key, verify sub2 route, coalesce re
   } } } }); t.after(() => panel.close());
   const [main, duplicate] = await Promise.all([panel.call('account/check'), panel.call('account/check')]);
   assert.deepEqual(main, duplicate); assert.equal(main.bridge.ok, true); assert.equal(main.sub2api.ok, true);
+  for (let i = 0; i < 3; i++) {
+    const snapshot = await panel.call('account/check/status');
+    assert.equal(snapshot.running, false); assert.deepEqual(snapshot.result, main);
+  }
+  const realNow = Date.now();
+  const time = t.mock.method(Date, 'now', () => realNow + 20000);
+  const older = await panel.call('account/check/status');
+  time.mock.restore();
+  assert.deepEqual(older.result, main, 'display result survives beyond the 10 second probe cache');
+  await assert.rejects(panel.call('account/check/status', { account: 'missing' }), /未托管/);
+  assert.equal(devices.length, 1, 'reading stored status sends no request to relay');
   const result = await panel.call('account/check', { account: 'second' });
   assert.equal(result.bridge.ok, true); assert.equal(result.sub2api.ok, false);
   assert.ok(!JSON.stringify(result).includes('private-upstream-diagnostic'));

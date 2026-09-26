@@ -13,6 +13,7 @@ lib/**
 !lib/membership.js
 !lib/window-keeper.js
 !lib/sse.js
+!lib/usage.js
 !lib/panel.js
 !scripts/
 scripts/**

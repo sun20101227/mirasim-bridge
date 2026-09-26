@@ -26,8 +26,9 @@ const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { summarizeMembership } = require('./lib/membership');
 const windowKeeper = require('./lib/window-keeper');
-const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.8.6';
+const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
+const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
+const VERSION = '0.8.7';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -2267,6 +2268,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   res.once('close', abort);
   const startedAt = Date.now();
   let ttfbMs = null, outcome = null, cleanBody = null;
+  let usage = null, attempts = 0;
   const countOk = () => { ctx.counters.ok++; outcome = 'ok'; };
   const countErr = () => { ctx.counters.err++; outcome = 'err'; };
   try {
@@ -2329,7 +2331,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     try { parsed = JSON.parse(body.toString('utf8')); } catch { /* handled below */ }
     if (!isPlainObject(parsed) || !isModelAllowed(parsed.model, cfg)) return fail400(res, { message: 'count_tokens 需要允许的 model 和 JSON 对象' });
   }
-  if (req.method === 'POST' && pathname === '/v1/messages') {
+  if (req.method === 'POST' && wirePath === '/v1/messages') {
     let parsed = null;
     try { parsed = JSON.parse(body.toString('utf8')); } catch { /* 下面统一返回本地 400 */ }
     if (!isPlainObject(parsed)) return fail400(res, { message: '请求体必须是 JSON 对象' });
@@ -2372,6 +2374,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   headers['accept-encoding'] = 'identity';
 
   const sendOnce = (bodyBuf) => {
+    if (cleanBody && (wirePath === '/v1/messages' || isResponses)) {
+      usage ||= new UsageObservation(wirePath === '/v1/messages' ? 'messages' : wirePath.endsWith('/compact') ? 'compact' : 'responses');
+      attempts++;
+    }
     const h = { ...headers };
     if (bodyBuf) h['content-length'] = bodyBuf.length;
     return requestUpstream(target, agent, {
@@ -2494,7 +2500,11 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   }
 
   if (status === 200 && wirePath === '/v1/responses' && !responsesStream) {
-    const response = aggregateResponses(await readStreamText(upRes));
+    const raw = await readStreamText(upRes);
+    // Observe the upstream frames even when aggregation fails or the model is refused.
+    if (raw.trimStart().startsWith('{')) { try { usage?.json(JSON.parse(raw)); } catch {} }
+    else { try { new TerminalEvents('responses', (e, type) => usage?.accept(e, type)).push(Buffer.from(raw)); } catch {} }
+    const response = aggregateResponses(raw);
     if (noteServedModel(ctx, cfg, cleanBody?.model, response.model)) {
       countErr();
       return fail503(res, 'upstream_stream_model_fallback');
@@ -2523,6 +2533,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
         begin: () => res.writeHead(status, eventHeaders),
         firstEventTimeoutMs: cfg.forward.upstream_headers_timeout_ms,
         onServed: (served) => noteServedModel(ctx, cfg, cleanBody?.model, served),
+        onEvent: (e, type) => usage?.accept(e, type),
       });
       if (ok) countOk();
       else { countErr(); record('upstream_stream_error'); }
@@ -2539,12 +2550,22 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   }
 
   // --- 其余一切：原样转发（SSE 流式也走这条，pipe 自带背压）---
+  // A bounded side buffer for non-streamed usage; forwarding bytes stays unchanged.
+  let usageChunks = [], usageBytes = 0, usageOverflow = false;
+  if (usage && status === 200 && (!upRes.headers['content-encoding'] || upRes.headers['content-encoding'] === 'identity')) {
+    upRes.on('data', chunk => {
+      usageBytes += chunk.length;
+      if (usageBytes > 8 * 1024 * 1024) { usageOverflow = true; usageChunks = []; }
+      else if (!usageOverflow) usageChunks.push(chunk);
+    });
+  }
   res.writeHead(status, mergedHeaders(upRes.headers));
   await new Promise((done) => {
     let finished = false;
     const finish = (complete) => {
       if (finished) return;
       finished = true;
+      if (complete && usageChunks.length && !usageOverflow) { try { usage.json(JSON.parse(Buffer.concat(usageChunks).toString('utf8'))); } catch {} }
       if (complete && status >= 200 && status < 400) countOk(); else countErr();
       if (!complete) res.destroy();
       done();
@@ -2559,6 +2580,11 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     if (kimiSlot) ctx.kimiInflight--;
     res.removeListener('close', abort);
     controller.abort();
+    if (usage && attempts) {
+      // The response is already delivered. Accounting failure must not affect it.
+      await usageStoreFor(cfg, ctx).record({ model: cleanBody.model, served_model: usage.served, protocol: usage.protocol,
+        ok: outcome === 'ok', status: res.headersSent ? res.statusCode : null, elapsed_ms: Date.now() - startedAt, attempts, ...usage.snapshot() });
+    }
     if (outcome) {
       bumpHistory(ctx, outcome);
       if (cleanBody?.model) recordLatency(ctx, cleanBody.model, { at: Date.now(), ok: outcome === 'ok', ttfb: ttfbMs, total: Date.now() - startedAt });

@@ -1,4 +1,15 @@
-# Mira 网页管理后台（0.8.6）
+# Mira 网页管理后台（0.8.7）
+
+> 0.8.7：检测结果在对应区域自动更新，无需刷新整个页面。普通页面约 15 秒查询状态；正在运行的账号检测、窗口任务、升级约 2 秒跟踪一次，模型目录约 30 秒更新。轮询只读取状态，不会反复发送 `hi` 或模型测试。未保存的表单输入会保留；切到浏览器后台暂停轮询，回来后立即同步。
+
+### 0.8.7 新增管理功能
+
+- **用量与消耗**：侧栏“用量统计”按顶部所选账号展示模型请求数、输入/输出/缓存 Token、每日趋势和最近请求；可筛选今天/7 天/30 天及模型，导出 CSV。每账号可设置模型单价，显示已估算比例；上游用量缺失时标记未知。记录持久化 30 天，启用后才开始采集，不补历史账单。计费口径与操作见 [用量统计说明](USAGE.md)。
+- **账号筛选**：概览可搜索账号名、profile、分组 ID、套餐；筛选需要关注、三天内到期、已到期、额度偏低、已暂停，按到期时间或异常数量排序。筛选不会切换当前选中的账号。
+- **账号提醒**：根据已读取的快照汇总到期、低额度和连接异常。低额度阈值为账号通用窗口剩余不超过 10%，模型专用额度不作为整个账号的低额度；失效或读取失败的数据不生成新的到期/低额度判断。
+- **批量检测**：可检测所有账号或当前筛选结果；点击“停止后续检测”会让当前请求结束后停止，未执行的项目显示已取消；“仅重试失败账号”只重新检测失败项。未注册 sub2 的账号可能只通过 bridge 链路，会显示“部分通过”。检测依然只读模型目录，不发送推理。
+- **模型查找**：按模型 ID、系列、启用状态或当前页面会话中的测试失败记录筛选，支持复制 ID。搜索和筛选不请求上游，也不会自动批量测试模型。
+- **诊断快照导出**：在概览下载 JSON，账号标识替换成 `account-1` 等匿名序号。只包含缓存的版本、调度、会员日期、额度百分比、计数及连接检测数值；不包含服务地址、邮箱、原始日志或任何密钥。报告有采样时间，不能当作导出瞬间重新检测的结果。
 
 0.8.6 在账号页加入会员到期状态和自动窗口设置；概览也按账号显示套餐摘要。自动窗口默认关闭，会发送计费的小请求，启用前阅读 [会员与窗口操作说明](MEMBERSHIP-WINDOWS.md)。升级不用重新登录 Mira，也不会给已有账号自动开任务。
 
@@ -16,13 +27,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.6/mirasim-bridge-0.8.6-source.zip \
-  -o mirasim-bridge-0.8.6-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.7/mirasim-bridge-0.8.7-source.zip \
+  -o mirasim-bridge-0.8.7-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.6/mirasim-bridge-0.8.6-source.zip.sha256 \
-  -o mirasim-bridge-0.8.6-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.6-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.6-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.7/mirasim-bridge-0.8.7-source.zip.sha256 \
+  -o mirasim-bridge-0.8.7-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.7-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.7-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 

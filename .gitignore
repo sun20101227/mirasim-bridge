@@ -23,6 +23,7 @@ state.json
 state.json.*.tmp
 window-keeper.json
 window-keeper.json.*
+usage/
 
 # 运行产物
 *.log

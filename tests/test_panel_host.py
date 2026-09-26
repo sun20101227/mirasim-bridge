@@ -105,6 +105,19 @@ class PanelHostTests(unittest.TestCase):
         console.call({'operation': 'login/start', 'data': {'hosted': True, 'profile': 'github-account', 'provider': 'github'}})
         self.assertEqual(calls[0]['data']['provider'], 'github')
 
+    def test_usage_read_is_available_during_deployment_and_pricing_is_a_mutation(self):
+        calls = []
+        console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append(data) or {'ok': True})
+        self.agent.lock.acquire()
+        try:
+            self.assertTrue(console.call({'operation': 'usage', 'data': {'account': 'second', 'days': 7}})['ok'])
+            self.assertEqual(calls[0]['data']['account'], 'second')
+            with self.assertRaises(ValueError):
+                console.call({'operation': 'usage/pricing', 'data': {'model': 'test', 'rates': {}}})
+        finally:
+            self.agent.lock.release()
+        self.assertTrue(console.call({'operation': 'usage/pricing', 'data': {'model': 'test', 'rates': {}}})['ok'])
+
     def test_repair_preserves_container_snapshots_but_does_not_restore_stale_host_code(self):
         spec = importlib.util.spec_from_file_location('install_panel', Path(__file__).parents[1] / 'scripts/install-panel.py')
         installer = importlib.util.module_from_spec(spec); spec.loader.exec_module(installer)

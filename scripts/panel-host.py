@@ -12,8 +12,8 @@ ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
           '/panel/icon.png': ('icon.png', 'image/png')}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs'}
-READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'membership/refresh'}
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs', 'usage', 'usage/pricing'}
+READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'usage'}
 
 
 def command_input(args, data, timeout=55):

@@ -266,6 +266,20 @@ label.check input{width:auto}
 .lat-nums div[data-tone="warn"] b{color:var(--warn)}
 td.lat-cell b{font-variant-numeric:tabular-nums}
 td.lat-cell .pill{margin-left:6px}
+.test-result{font-size:12px;margin-top:5px}.test-result.ok-text{color:var(--ok)}
+.usage-stats strong{font-size:25px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.usage-trend{max-height:300px;overflow:auto;display:grid;gap:8px}
+.usage-day{display:grid;grid-template-columns:46px minmax(0,1fr) 86px;gap:10px;align-items:center;font-size:12px}
+.usage-day .num{text-align:right}.usage-day meter{width:100%;height:16px;accent-color:var(--accent)}
+.usage-day meter::-webkit-meter-optimum-value{background:var(--accent)}
+.usage-coverage{margin:12px 0}.usage-metric{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.usage-metric span{color:var(--muted);font-size:12px}
+[data-section="usage"] td{font-variant-numeric:tabular-nums}[data-section="usage"] table{min-width:850px}
+#pricing-form{align-items:end;margin-bottom:16px}#pricing-form label{min-width:0}#pricing-form button{justify-self:start}
+.filter-bar{display:flex;flex-wrap:wrap;align-items:end;gap:12px;margin:12px 0 18px}.filter-bar label{flex:1 1 150px;min-width:0}.filter-bar label:first-child{flex:2 1 240px}
+.alert-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.account-alert{display:flex;justify-content:space-between;gap:16px;width:100%;text-align:left;background:var(--surface-2);color:var(--text);border:1px solid var(--line);margin:6px 0;white-space:normal}.account-alert:hover{border-color:var(--accent);background:var(--surface-2)}
+.batch-toolbar{margin-top:14px;align-items:center}.batch-result{display:grid;grid-template-columns:minmax(100px,1fr) minmax(150px,2fr) auto;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);align-items:center}.batch-result b{overflow-wrap:anywhere}
+@media(max-width:700px){.filter-bar label{flex:1 1 120px}.filter-bar label:first-child{flex-basis:100%}.account-alert{flex-direction:column;gap:4px}.batch-result{grid-template-columns:1fr auto}.batch-result>.hint{grid-column:1/-1;grid-row:2}.batch-toolbar{gap:8px}}
 .logs{margin:0;background:var(--side);color:var(--side-strong);border-radius:10px;padding:14px 16px;font-size:12px;line-height:1.55;max-height:70vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 #log-filter{width:240px}
 @media(max-width:1100px){.two-col{grid-template-columns:1fr}}
