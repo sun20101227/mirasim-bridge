@@ -95,6 +95,30 @@ class PanelHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Repair requires'):
             installer.prepare_recovery(self.agent)
 
+    def test_background_read_does_not_block_oauth_completion_or_release_mutation_lock(self):
+        reading, finish = threading.Event(), threading.Event()
+        def bridge(args, data):
+            if data['operation'] == 'summary':
+                reading.set(); finish.wait(3)
+            return {'stage': 'saved'}
+        console = p.Console(self.agent, m.atomic_json, run_input=bridge)
+        thread = threading.Thread(target=lambda: console.call({'operation': 'summary'}))
+        thread.start()
+        try:
+            self.assertTrue(reading.wait(2))
+            self.assertFalse(self.agent.lock.locked(), 'refresh must not acquire mutation mutex')
+            self.assertEqual(console.call({'operation': 'login/complete'})['stage'], 'saved')
+            self.agent.lock.acquire()
+            try:
+                self.assertEqual(console.call({'operation': 'login/status'})['stage'], 'saved')
+                self.assertTrue(self.agent.lock.locked(), 'read must not release another operation lock')
+                with self.assertRaises(ValueError):
+                    console.call({'operation': 'login/complete'})
+            finally:
+                self.agent.lock.release()
+        finally:
+            finish.set(); thread.join(3)
+
     def test_bridge_input_uses_stdin_and_only_selected_target(self):
         calls = []
         console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append((argv, data)) or {})

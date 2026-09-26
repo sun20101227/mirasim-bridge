@@ -12,7 +12,8 @@ ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
           '/panel/icon.png': ('icon.png', 'image/png')}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'codex', 'logs'}
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'codex', 'logs'}
+READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check'}
 
 
 def command_input(args, data, timeout=55):
@@ -173,10 +174,15 @@ class Console:
             return {'accepted': accepted, **self.agent.status()}
         if op not in OPERATIONS | {'start', 'stop', 'attach'}:
             raise ValueError('Unknown operation')
-        if not self.agent.lock.acquire(blocking=False):
-            raise ValueError('Another management operation is in progress')
+        readonly = op in READ_OPERATIONS or (op == 'codex' and data.get('enabled') is None)
+        # Refreshes do not change host topology: they must not compete with OAuth
+        # completion for the deployment mutex. Mutations remain serialized.
+        acquired = False
+        if not readonly:
+            acquired = self.agent.lock.acquire(blocking=False)
+            if not acquired:
+                raise ValueError('正在执行升级或账号修改，请稍后重试；已提交的登录回调不会因此被清除')
         try:
-            readonly = op in {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status'} or (op == 'codex' and data.get('enabled') is None)
             if self.agent.state.get('phase') == 'rollback_failed' and not readonly:
                 raise ValueError('Recover the failed rollback first')
             if op == 'attach':
@@ -196,14 +202,15 @@ class Console:
                 if op == 'login/start':
                     data = self.login_options(data)
                 result = self.bridge(self.target(name), op, data)
-            if op not in {'status', 'summary', 'models', 'profiles', 'groups', 'login/status', 'accounts', 'logs', 'codex'} or (op == 'codex' and data.get('enabled') is not None):
+            if not readonly or op in {'account/access', 'account/check'}:
                 self.audit(op, name, True)
             return result
         except Exception:
             self.audit(op, name, False)
             raise
         finally:
-            self.agent.lock.release()
+            if acquired:
+                self.agent.lock.release()
 
 
 def handler(agent, token, fallback, persist):

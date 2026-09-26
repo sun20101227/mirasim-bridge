@@ -4,6 +4,8 @@ const host = document.body.dataset.mode === 'host';
 let key = '', loginSession = null, timer = null, polling = false, noticeTimer = null, view = 'overview';
 let selected = { target: 'main', account: 'main' };
 let fleetRows = [], bridgeVersion = null, modelRows = [], modelsFor = '', groupsCache = null;
+let actionsBusy = 0, accessHideTimer = null, accessFor = '', loginFinishing = false;
+const connectionResults = new Map();
 const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', logs: '运行日志', release: '版本与升级' };
 const KNOWN = ['claude', 'gpt', 'deepseek', 'kimi'];
 const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi', glm: 'GLM', other: '其他' };
@@ -11,6 +13,7 @@ const familyName = (f) => FAMILY_NAMES[f] || (f ? f.charAt(0).toUpperCase() + f.
 const familyOrder = (f) => (KNOWN.includes(f) ? KNOWN.indexOf(f) : 10);
 const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '运行设置', codex: 'Codex 账号', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
 const SCHED = { on: ['已入池', 'ok'], off: ['已暂停', 'warn'], unmanaged: ['未接管', ''], unknown: ['等待确认', 'warn'] };
+Object.assign(ACTIONS, { 'account/access': '查看接入密钥', 'account/check': '检测账号连接' });
 async function groups() { if (!groupsCache) groupsCache = await api('groups', {}, 'main'); return groupsCache; }
 function fillGroups(select, platforms, current, placeholder) {
   const keep = current ?? select.value;
@@ -52,11 +55,39 @@ function guarded(fn) {
     event?.preventDefault();
     const btn = event?.submitter || (event?.currentTarget?.tagName === 'BUTTON' ? event.currentTarget : null);
     if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+    actionsBusy++;
     try { await fn(event); } catch (e) { notice(e.message, true); if ($('account-dialog').open) $('login-message').textContent = e.message; }
-    finally { if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); } }
+    finally { actionsBusy--; if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); } }
   };
 }
 function stat(id, value, tone) { $(id).querySelector('strong').textContent = value; if (tone) $(id).dataset.tone = tone; else delete $(id).dataset.tone; }
+function hideAccess() {
+  clearTimeout(accessHideTimer); accessFor = '';
+  $('access-key').value = ''; $('access-key').type = 'password'; $('access-base').value = ''; $('access-info').hidden = true;
+}
+async function revealAccess() {
+  const identity = `${selected.target}|${selected.account}`;
+  const r = await api('account/access', scoped({ reveal: true }));
+  if (identity !== `${selected.target}|${selected.account}`) throw Error('当前账号已切换，请重新查看密钥');
+  hideAccess(); accessFor = identity;
+  $('access-info').hidden = false; $('access-base').value = r.base_url; $('access-key').value = r.api_key; $('access-key').type = 'text';
+  accessHideTimer = setTimeout(hideAccess, 60000);
+  return r.api_key;
+}
+function renderConnection() {
+  const box = $('connection-check'), r = connectionResults.get(`${selected.target}|${selected.account}`);
+  box.replaceChildren();
+  if (!r) { box.append(node('strong', '尚未检测')); delete box.dataset.tone; return; }
+  const complete = r.bridge.ok && r.sub2api.ok === true;
+  box.dataset.tone = !r.ok ? 'bad' : complete ? 'ok' : 'warn';
+  box.append(node('strong', !r.ok ? '连接检测未通过' : complete ? '两段连接均通过' : '桥接器已连通，sub2 尚未检测'),
+    node('span', r.bridge.message + (r.bridge.model_count != null ? ` · ${r.bridge.model_count} 个模型` : '') + ` · ${ms(r.bridge.elapsed_ms)}`),
+    node('span', r.sub2api.message), node('span', '检测于 ' + new Date(r.checked_at).toLocaleTimeString()));
+}
+async function checkConnection(target, account) {
+  const r = await api('account/check', { account }, target);
+  connectionResults.set(`${target}|${account}`, r); renderConnection(); return r;
+}
 function quotaLevel(pct) { return pct == null ? '' : pct < 10 ? 'bad' : pct < 30 ? 'warn' : 'ok'; }
 function quotaMini(quota) {
   const box = node('div', '', 'quota-mini');
@@ -138,6 +169,8 @@ function renderLatency(latency) {
 }
 
 async function overview() {
+  if (accessFor !== `${selected.target}|${selected.account}`) hideAccess();
+  renderConnection();
   bridgeVersion = null; $('current-version').textContent = '—';
   const s = await api('summary', scoped()), runtime = await api('status', scoped());
   const sub = runtime.sub2api || {};
@@ -358,6 +391,7 @@ async function refresh() {
   if (view === 'models') await models(); if (view === 'logs') await logs();
 }
 async function showView(next) {
+  if (next !== 'accounts') hideAccess();
   view = next; $('page-title').textContent = titles[next];
   for (const el of document.querySelectorAll('[data-section]')) el.hidden = el.dataset.section !== next;
   for (const el of document.querySelectorAll('[data-view]')) el.classList.toggle('selected', el.dataset.view === next);
@@ -373,10 +407,30 @@ $('login-form').addEventListener('submit', guarded(async () => {
   $('key').value = ''; $('login-box').hidden = true; $('workspace').hidden = false; notice('已连接后台');
   try { await refresh(); } catch (err) { notice(err.message, true); }
   clearInterval(timer);
-  timer = setInterval(async () => { if (!key || polling || document.hidden) return; polling = true; try { try { await fleet(); await overview(); } finally { await deployment(); } if (view === 'logs') await logs(); } catch {} finally { polling = false; } }, 15000);
+  timer = setInterval(async () => { if (!key || polling || actionsBusy || document.hidden) return; polling = true; try { if (loginSession && !loginFinishing) await queryLogin(); try { await fleet(); await overview(); } finally { await deployment(); } if (view === 'logs') await logs(); } catch {} finally { polling = false; } }, 15000);
 }));
-$('logout').addEventListener('click', () => { key = ''; clearInterval(timer); location.reload(); });
+$('logout').addEventListener('click', () => { hideAccess(); key = ''; clearInterval(timer); location.reload(); });
 $('refresh').addEventListener('click', guarded(refresh)); $('load-models').addEventListener('click', guarded(models)); $('load-logs').addEventListener('click', guarded(logs));
+$('reveal-key').addEventListener('click', guarded(revealAccess));
+$('hide-key').addEventListener('click', hideAccess);
+$('copy-key').addEventListener('click', guarded(async () => {
+  const value = await revealAccess();
+  try { await navigator.clipboard.writeText(value); notice('当前账号的 bridge 密钥已复制。'); }
+  catch { notice('浏览器不允许复制，密钥已显示，请手动复制。', true); }
+}));
+$('check-account').addEventListener('click', guarded(async () => {
+  $('connection-check').replaceChildren(node('strong', '正在检测当前账号…'));
+  await checkConnection(selected.target, selected.account);
+}));
+$('check-all-accounts').addEventListener('click', guarded(async () => {
+  const box = $('fleet-checks'); box.replaceChildren();
+  for (const row of fleetRows.slice()) {
+    const line = node('p', `${label(row)}：检测中…`); box.append(line);
+    try { const r = await checkConnection(row.target, row.account); line.textContent = `${label(row)}：${r.bridge.ok ? 'bridge 已通' : 'bridge 未通'} · ${r.sub2api.ok === true ? 'sub2 已通' : r.sub2api.ok === false ? 'sub2 未通' : 'sub2 未注册/未测试'}`; }
+    catch (err) { line.textContent = `${label(row)}：${err.message}`; }
+  }
+}));
+document.addEventListener('visibilitychange', () => { if (document.hidden) hideAccess(); });
 $('log-filter').addEventListener('input', () => { logs().catch(() => {}); });
 $('check-release').addEventListener('click', guarded(checkRelease));
 $('settings-form').addEventListener('submit', guarded(async () => {
@@ -392,6 +446,7 @@ $('codex-form').addEventListener('submit', guarded(async () => {
 }));
 $('target').addEventListener('change', guarded(async () => {
   const [target, account] = $('target').value.split('|'); selected = { target, account };
+  hideAccess();
   modelRows = []; modelsFor = ''; $('models').replaceChildren(); $('family-card').hidden = true; $('model-summary').replaceChildren();
   await refresh(); notice(`已选择 ${label(selected)}。`);
 }));
@@ -451,16 +506,44 @@ $('account-form').addEventListener('submit', guarded(async () => {
   if (r.url) { const u = new URL(r.url); if (u.protocol !== 'https:') throw Error('授权地址不是 HTTPS'); $('oauth-link').href = r.url; }
   $('login-hint').textContent = data.provider === 'email' ? '验证码已发送。输错可重试，最多 5 次；不要重复发送。' : '在无痕窗口打开授权链接。授权后会跳到 127.0.0.1，显示无法访问属于正常情况；复制地址栏完整回调 URL 到下面，不要发送给他人。';
   $('code').type = 'password'; $('code').value = ''; $('code').placeholder = data.provider === 'email' ? '邮箱验证码' : '完整回调 URL'; $('login-message').textContent = '';
+  $('complete-prompt').textContent = data.provider === 'email' ? '邮箱验证码' : '完整回调 URL（包含 access_token 与 state）';
 }));
-$('complete-form').addEventListener('submit', guarded(async () => {
-  if (!loginSession) throw Error('请先发起登录');
-  const data = { id: loginSession.id }; data[loginSession.provider === 'email' ? 'code' : 'callback'] = $('code').value.trim();
-  const r = await api('login/complete', data, 'main'); $('code').value = ''; const session = loginSession; loginSession = null; $('complete-box').hidden = true; $('account-dialog').close();
+async function finishLogin(r, session) {
+  if (loginFinishing || loginSession !== session) return;
+  loginFinishing = true;
+  $('code').value = ''; loginSession = null; $('complete-box').hidden = true; $('account-dialog').close();
+  try {
   if (session.hosted) {
-    try { const h = await api('account/host', { profile: r.profile }, 'main'); notice(`账号 ${r.profile} 已保存并托管${h.registered ? `，sub2 账号 ${h.account_name} 已注册` : '，sub2 注册将在健康检查中完成'}。`); }
+    try { const h = await api('account/host', { profile: r.profile }, 'main'); selected = { target: 'main', account: r.profile }; notice(`回调已收到，账号 ${r.profile} 已保存并托管${h.registered ? `，sub2 账号 ${h.account_name} 已注册` : '，sub2 注册将在健康检查中完成'}。`); }
     catch (e) { notice(`账号 ${r.profile} 已保存，但托管失败：${e.message}。可在 profiles 列表重试。`, true); }
   } else notice(`账号 ${r.profile} 已独立保存。${host ? '点击 profiles 列表中的“独立容器”。' : '请启动对应 profile 容器。'}`);
-  await refresh();
+  try { await refresh(); } catch { notice(`账号 ${r.profile} 已保存；页面刷新未完成，请稍后点刷新。`, true); }
+  } finally { loginFinishing = false; }
+}
+async function queryLogin() {
+  const session = loginSession;
+  if (!session || loginFinishing) return;
+  const r = await api('login/status', { id: session.id }, 'main');
+  if (r.stage === 'saved') return finishLogin(r, session);
+  $('login-message').textContent = { waiting: '本次登录仍在等待回调，请粘贴授权后的完整地址并提交。', validating: '回调已收到，正在验证并保存账号，请勿重复授权。', failed: '回调验证或保存未完成，原账号未修改。' }[r.stage] || '正在查询登录状态';
+}
+$('login-status').addEventListener('click', guarded(queryLogin));
+$('complete-form').addEventListener('submit', guarded(async () => {
+  const session = loginSession;
+  if (!session) throw Error('请先发起登录');
+  const data = { id: session.id }; data[session.provider === 'email' ? 'code' : 'callback'] = $('code').value.trim();
+  $('login-message').textContent = '正在提交回调并校验账号…';
+  let r;
+  try { r = await api('login/complete', data, 'main'); }
+  catch (err) {
+    // A response can be lost after credentials were saved. Check the same session
+    // before asking the user to authorize or submit again.
+    const status = await api('login/status', { id: session.id }, 'main').catch(() => null);
+    if (status?.stage === 'saved') return finishLogin(status, session);
+    if (status?.stage === 'validating') { $('login-message').textContent = '回调已收到，后台仍在校验；请稍后查询登录状态。'; return; }
+    throw err;
+  }
+  await finishLogin(r, session);
 }));
 $('mode').textContent = host ? '宿主机管理' : '单 bridge 管理';
 for (const id of ['start-account', 'stop-account', 'deploy', 'rollback', 'deploy-status', 'check-release']) $(id).disabled = !host;

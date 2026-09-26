@@ -8,14 +8,15 @@ const crypto = require('node:crypto');
 
 function page(reply) {
   const elements = new Map();
-  const make = () => ({ value: '', checked: false, textContent: '', hidden: false, dataset: {}, children: [], events: {},
+  const make = () => ({ value: '', checked: false, textContent: '', hidden: false, dataset: {}, children: [], events: {}, classList: { toggle() {} },
     addEventListener(event, fn) { this.events[event] = fn; },
+    close() { this.open = false; },
     setAttribute() {}, removeAttribute() {}, append(...nodes) { this.children.push(...nodes); },
     replaceChildren(...nodes) { this.children = nodes; } });
   const get = (id) => { if (!elements.has(id)) elements.set(id, make()); return elements.get(id); };
   const calls = [];
   const context = vm.createContext({ URL, AbortSignal, crypto, Event, setTimeout: () => 0, clearTimeout() {},
-    document: { body: { dataset: { mode: 'host' } }, getElementById: get, querySelectorAll: () => [], createElement: make, createTextNode: (text) => ({ textContent: text }) },
+    document: { body: { dataset: { mode: 'host' } }, addEventListener() {}, getElementById: get, querySelectorAll: () => [], createElement: make, createTextNode: (text) => ({ textContent: text }) },
     fetch: async (_url, options) => {
       const request = JSON.parse(options.body); calls.push(request);
       const body = await reply(request);
@@ -75,4 +76,35 @@ test('accepted deployment is not labelled completed and detailed recovery failur
   const event = p.get('events').children[0];
   assert.equal(event.children.at(-1).textContent, '已接受任务');
   assert.match(p.get('deploy-state').children.at(-1).textContent, /main.*检查恢复后的服务.*桥接器未正常响应/);
+});
+
+test('account key is fetched only on demand and cleared when hidden or account changes', async () => {
+  const p = page(() => ({ account: 'main', base_url: 'http://bridge:8787', api_key: 'only-this-account' }));
+  assert.equal(p.calls.length, 0);
+  await p.run('revealAccess()');
+  assert.equal(p.calls[0].operation, 'account/access'); assert.equal(p.calls[0].data.reveal, true);
+  assert.equal(p.get('access-key').value, 'only-this-account');
+  p.run('hideAccess()');
+  assert.equal(p.get('access-key').value, ''); assert.equal(p.get('access-info').hidden, true);
+});
+
+for (const stage of ['saved', 'validating']) test(`lost callback response is reconciled with login/status (${stage})`, async () => {
+  const p = page(({ operation }) => {
+    if (operation === 'login/complete') throw Error('connection lost');
+    if (operation === 'login/status') return { stage, saved: stage === 'saved', profile: 'second' };
+    if (operation === 'account/host') return { registered: true, account_name: 'mira-second' };
+    throw Error('unexpected operation');
+  });
+  p.run("loginSession = { id: 'session-1', provider: 'github', hosted: true }; refresh = async () => {};");
+  p.get('code').value = 'http://127.0.0.1/callback?state=mock';
+  await p.get('complete-form').events.submit({ preventDefault() {} });
+  assert.deepEqual(p.calls.slice(0, 2).map((c) => c.operation), ['login/complete', 'login/status']);
+  if (stage === 'saved') {
+    assert.equal(p.run('loginSession'), null); assert.equal(p.get('code').value, '');
+    assert.equal(p.run('selected.account'), 'second');
+    assert.match(p.get('notice-text').textContent, /回调已收到/);
+  } else {
+    assert.match(p.get('login-message').textContent, /回调已收到/);
+    assert.equal(p.calls.length, 2);
+  }
 });

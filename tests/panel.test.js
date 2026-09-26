@@ -32,6 +32,15 @@ test('panel HTTP routes require independent key; shell assets use CSP and contai
   assert.equal((await call({ 'x-panel-key': key }, [])).status, 400);
   assert.equal((await fetch(origin + '/__live', { headers: { 'x-panel-key': key } })).status, 503);
   assert.equal((await fetch(origin + '/panel/unknown')).status, 404);
+  const access = (headers) => fetch(origin + '/__panel/account/access', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ reveal: true }) });
+  assert.equal((await access({ 'x-api-key': cfg.bridge_secret })).status, 403, 'inference key cannot read account keys');
+  const revealed = await access({ 'x-panel-key': key });
+  assert.equal(revealed.headers.get('cache-control'), 'no-store');
+  const credentials = await revealed.json();
+  assert.equal(credentials.api_key, cfg.bridge_secret);
+  assert.equal(credentials.access_token, undefined);
+  const summary = await (await call({ 'x-panel-key': key })).text();
+  assert.ok(!summary.includes(cfg.bridge_secret), 'ordinary refresh never reveals inference keys');
 });
 test('email profile flow keeps original credentials and config intact; wrong code can retry without revealing tokens', async (t) => {
   const { cfg, ctx, dir } = fixture(t); const before = fs.readFileSync(cfg._config_path);
@@ -95,6 +104,9 @@ for (const provider of ['google', 'github']) test(`panel ${provider} generates O
   callback.searchParams.set('refresh_token', 'refresh-' + provider);
   const saved = await panel.call('login/complete', { id: login.id, callback: callback.href });
   assert.equal(saved.saved, true);
+  const status = await panel.call('login/status', { id: login.id });
+  assert.equal(status.stage, 'saved'); assert.equal(status.saved, true); assert.equal(status.profile, provider + '-account');
+  assert.ok(!JSON.stringify(status).includes('new-' + provider));
   assert.deepEqual(fs.readFileSync(cfg._config_path), before);
   assert.equal(fs.readFileSync(path.join(dir, 'setting.json'), 'utf8'), 'original-credential');
   const credential = JSON.parse(fs.readFileSync(path.join(dir, 'profiles', provider + '-account', 'setting.json')));

@@ -121,6 +121,35 @@ test('one listener routes each secret to its own account, relay credential and c
   assert.equal(own.account, 'second');
 });
 
+test('connection checks use each real bridge key, verify sub2 route, coalesce repeats and never resume accounts', async (t) => {
+  const dir = tmp(t, 'bridge-check-'); const { origin, devices } = await fakeRelay(t);
+  const cfg = mainConfig(dir, origin);
+  writeProfile(dir, 'second', { relay: { url: origin, auth_url: origin, setting_json: 'setting.json' } });
+  const ctx = b.newAccountCtx('main'), hub = new b.AccountHub(cfg, ctx), second = hub.add('second');
+  const server = b.createBridgeServer(cfg, ctx, cfg.bridge_secret, 2), base = await listen(server); t.after(() => close(server));
+  for (const a of hub.all()) a.cfg.listen.port = new URL(base).port;
+  ctx.sm = { accountId: 11, desired: 'off' }; ctx.hold = true;
+  second.ctx.sm = { accountId: 22, desired: 'off' }; second.ctx.hold = true;
+  const reverse = [];
+  const panel = createPanel(cfg, ctx, { bridge: { ...b, s2: { ...b.s2, syncModels: async (config, id) => {
+    reverse.push({ id, key: config.bridge_secret });
+    if (id === 22) throw Error('private-upstream-diagnostic');
+    return { data: [{ id: 'kimi-k3' }] };
+  } } } }); t.after(() => panel.close());
+  const [main, duplicate] = await Promise.all([panel.call('account/check'), panel.call('account/check')]);
+  assert.deepEqual(main, duplicate); assert.equal(main.bridge.ok, true); assert.equal(main.sub2api.ok, true);
+  const result = await panel.call('account/check', { account: 'second' });
+  assert.equal(result.bridge.ok, true); assert.equal(result.sub2api.ok, false);
+  assert.ok(!JSON.stringify(result).includes('private-upstream-diagnostic'));
+  assert.equal(result.bridge.model_count, 2);
+  assert.deepEqual(reverse, [{ id: 11, key: 'secret-main' }, { id: 22, key: 'secret-second' }]);
+  assert.equal(devices.length, 2); assert.notEqual(devices[0], devices[1], 'probes actually used different upstream identities');
+  assert.equal(ctx.hold, true); assert.equal(second.ctx.hold, true); assert.equal(ctx.sm.desired, 'off');
+  const access = await panel.call('account/access', { account: 'second', reveal: true });
+  assert.equal(access.api_key, 'secret-second'); assert.equal(access.base_url, b.bridgeBaseUrl(cfg));
+  await assert.rejects(panel.call('account/access', { account: 'second' }), /点击/);
+});
+
 test('panel hosts, scopes settings/models, pauses and unhosts accounts; persists to the right files', { timeout: 20000 }, async (t) => {
   const dir = tmp(t, 'bridge-hosted-'); const { origin } = await fakeRelay(t);
   const cfg = mainConfig(dir, origin);
@@ -136,7 +165,8 @@ test('panel hosts, scopes settings/models, pauses and unhosts accounts; persists
   assert.deepEqual(registered, ['second']);
   assert.deepEqual(JSON.parse(fs.readFileSync(cfg._config_path)).accounts.hosted, ['second']);
   assert.ok(!fs.readFileSync(cfg._config_path, 'utf8').includes('admin-key-from-env'), 'env-injected admin key never written');
-  await assert.rejects(panel.call('account/host', { profile: 'second' }), /已在托管/);
+  assert.deepEqual(await panel.call('account/host', { profile: 'second' }), hosted, 'lost response retry is idempotent');
+  assert.deepEqual(registered, ['second'], 'retry does not register twice');
   const profiles = await panel.call('profiles');
   assert.deepEqual(profiles.map((p) => [p.profile, p.hosted, p.listed]), [['second', true, true]]);
   // Scoped settings go to the profile's own config.json; main's stays untouched.

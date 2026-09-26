@@ -16,7 +16,7 @@ async function main() {
   const key = fs.readFileSync(keyFile, 'utf8').trim();
   if (data.operation === 'panel-key') { process.stdout.write(JSON.stringify({ status: 200, data: { panel_key: key } })); return; }
   if (!['status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'profile/info', 'groups', 'login/start', 'login/complete', 'login/status',
-    'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'codex', 'logs'].includes(data.operation)) throw Error('unknown operation');
+    'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'codex', 'logs'].includes(data.operation)) throw Error('unknown operation');
   const body = JSON.stringify(data.data || {});
   // status goes through the panel op too: /__status only ever describes the account whose secret
   // is presented, while the panel op honours data.account (hosted accounts, 0.8.0).

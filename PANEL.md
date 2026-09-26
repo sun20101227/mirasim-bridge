@@ -1,4 +1,4 @@
-# Mira 网页管理后台（0.8.3）
+# Mira 网页管理后台（0.8.4）
 
 完整后台运行在**宿主机的部署服务 `127.0.0.1:8790`**。给它配置独立 HTTPS 域名，即可在浏览器管理账号、额度、模型、升级与回退。不需要改 sub2api，也不需要以后反复进 SSH。
 
@@ -14,13 +14,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.3/mirasim-bridge-0.8.3-source.zip \
-  -o mirasim-bridge-0.8.3-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.4/mirasim-bridge-0.8.4-source.zip \
+  -o mirasim-bridge-0.8.4-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.3/mirasim-bridge-0.8.3-source.zip.sha256 \
-  -o mirasim-bridge-0.8.3-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.3-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.3-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.4/mirasim-bridge-0.8.4-source.zip.sha256 \
+  -o mirasim-bridge-0.8.4-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.4-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.4-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
@@ -88,6 +88,16 @@ server {
 2. Profile 可留空自动生成；填写邮箱时会转为安全标识。邮箱验证码当前暂不可用，网页已禁用该选项。
 3. 选择 **Google 或 GitHub 授权**，在无痕窗口打开授权链接，完成后复制地址栏的最终回调 URL，粘贴到表单并验证。回调打不开属服务器登录的正常情况；不要把含 token 的地址发到聊天或日志。
 4. 保存成功后，原账号的凭证保持不变，新凭证保存在 `/data/profiles/名字/`。
+
+0.8.4 起可点“查询登录状态”，区分等待回调、验证中和已保存。提交回调时如果响应丢失，页面会自动查询同一会话；已经保存就继续托管，不必重新登录。已托管账号重复提交托管操作不会重复创建 sub2 账号。自动状态刷新不再与回调提交争用修改锁。
+
+### 查看账号密钥和检测连接（0.8.4）
+
+- 在顶部“当前账号”选择对应的 Mira 账号，然后在“账号管理 → 接入信息与连接检测”点 **查看密钥** 或 **复制密钥**。每个 Mira 账号密钥独立，sub2 上游账号注册时已自动填写。这是 **bridge 上游密钥**，不是 Mirasim 登录 token、sub2 管理 Key，也不是客户端调用 sub2 所需的用户 API Key。
+- 密钥仅在管理员明确点击时读取；概览、自动刷新和审计不包含密钥。60 秒后、切换账号/页面或切到后台时自动清除显示，不写入浏览器持久存储。
+- **检测当前账号** 使用此账号密钥经过实际 bridge 读取 `/v1/models`，检查鉴权、账号路由及 Mirasim 上游目录；已注册账号还会调用 sub2 的目录探测接口，检查 `sub2 → bridge`。页面分别显示两段结果、耗时、模型数和时间。
+- “概览 → 全部 Mira 账号 → **检测全部账号**”逐个检测。重复点击同一账号的检测会合并并使用 10 秒内的结果；不会恢复手动暂停的账号，不会写模型映射。
+- 目录连通不等于每个模型当前有生成容量。检测不发送推理请求；验证模型生成应到“模型目录”明确执行单次模型测试。
 5. 默认勾选 **“托管到当前 bridge”**：保存后页面自动托管并注册到 sub2，不新建容器。取消勾选则走旧的独立容器流程（profiles 列表的“独立容器”按钮）。
 6. 在概览“全部 Mira 账号”确认调度为“已入池”。注册依赖已有的 sub2 管理 Key；同组共享池，不同组隔离调用。
 

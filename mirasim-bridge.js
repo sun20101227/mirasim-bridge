@@ -25,7 +25,7 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { pipeEvents, endWithStreamError } = require('./lib/sse');
-const VERSION = '0.8.3';
+const VERSION = '0.8.4';
 const IS_WIN = process.platform === 'win32';
 
 /**
