@@ -43,7 +43,7 @@ test('Responses normalization/aggregation preserves tool and opaque items and de
   assert.ok(!('stream' in compact.body));
   const normalized = normalizeResponses({ model: 'gpt-test', input: 'hello', max_output_tokens: 512, temperature: 0.1 });
   assert.equal(normalized.body.input[0].content[0].text, 'hello');
-  assert.equal(normalized.body.store, false); assert.equal(normalized.body.max_output_tokens, undefined);
+  assert.equal(normalized.body.store, false); assert.equal(normalized.body.max_output_tokens, 512);
   assert.equal(normalized.body.temperature, undefined); assert.ok(normalized.body.include.includes('reasoning.encrypted_content'));
   assert.throws(() => normalizeResponses({ model: 'gpt-test', stream: true }, { compact: true }));
   assert.throws(() => normalizeResponses({ model: 'kimi-test' }));

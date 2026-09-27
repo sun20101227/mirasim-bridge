@@ -65,7 +65,8 @@
       "deepseek-v4-flash",
       "deepseek-v4-flash-vision-exp"
     ],
-    "kimi_default_effort": "low"
+    "kimi_default_effort": "low",
+    "gpt_default_effort": "high"
   },
   "keepalive": {
     "enabled": true,

@@ -34,6 +34,22 @@ function usageFixture(overrides = {}) {
     total, daily: [{ day: '2026-09-26', ...total }], models: [{ model: 'claude-test', protocol: 'messages', ...total }],
     recent: [], model_options: ['claude-test'], prices: { 'claude-test': { input: 3, output: 15, cache_read: 0.3, cache_write: null } }, ...overrides };
 }
+
+test('GPT request metadata identifies explicit low effort and is cleared on account switch', () => {
+  const p = page(() => ({}));
+  p.run("renderGptRequest({at:'2026-09-27T00:00:00Z',protocol:'responses',requested:'gpt-6-astra',served:'gpt-6-astra',sent_effort:'low',effort_source:'client',reported_effort:'low',ok:true,input_items:3,max_output_tokens:4096,reasoning_tokens:80})");
+  assert.match(p.get('gpt-request').children[2].textContent, /low.*客户端指定/);
+  p.run("setSelectedAccount({target:'main',account:'second'})");
+  assert.equal(p.get('gpt-request').children[0].textContent, '尚无 GPT 请求记录');
+});
+test('GPT default effort is submitted in scoped settings without losing the no-intervention option', async () => {
+  const p = page(({data}) => ({...data,saved:true}));
+  p.run("selected.account = 'second'; overview = async () => {};");
+  p.get('max-concurrency').value='2'; p.get('kimi-concurrency').value='1';p.get('model-fallback').value='forbid';p.get('kimi-effort').value='low';
+  p.get('gpt-effort').value='';
+  await p.get('settings-form').events.submit({preventDefault(){}});
+  assert.equal(p.calls[0].data.account,'second');assert.equal(p.calls[0].data.gpt_default_effort,'');
+});
 test('usage polling reads only local usage, keeps stable tables and unsaved prices', async () => {
   const p = page(() => usageFixture());
   p.run("view = 'usage'"); p.get('usage-days').value = '7';

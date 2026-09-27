@@ -1,5 +1,13 @@
 # 变更记录
 
+## 0.8.8 — 2026-09-27
+- 修复 GPT Responses 参数丢失：保留 max_output_tokens、context_management、显式 store:true、previous_response_id、推理/工具/压缩历史；max_completion_tokens 转为输出预算，冲突时明确拒绝。保留已验证必要的 SSE 和字符串输入转换，truncation:auto 明确拒绝而不再静默忽略。
+- 新增每账号 gpt_default_effort（默认 high），只在客户端及历史未指定推理档时补齐；网页可改为不干预或其他档位。显式 low/none/xhigh/max 等不被默认值覆盖，compact 不追加档位。high 可能增加耗时和 Token；连接性短测试显式使用 low。
+- 修复 Responses 非流式聚合在终止快照仅包含部分 output 时丢失已完成的推理、工具或压缩项；支持 SSE 命名事件，保留工具输出中的自有字段。
+- 移除非 Claude 模型在通用 400 错误后自动注入 Claude Code 身份的重试。上游模型在流末尾变化也纳入检测，forbid 策略会中断并返回流错误，不伪造完成事件。
+- 账号页新增“最近 GPT 请求”：显示实际协议、发送/上游报告的推理档、历史条数、输出上限和推理 Token，不保存正文或会话 ID。
+- 实际 relay 与本机 bridge 验证 gpt-6-astra Responses：约束计算、中文多轮记忆/算术及工具调用续答通过，上游报告模型一致；离线覆盖参数与历史完整性、显式推理档优先和流末尾替换。不能据此保证模型身份或所有任务的智力等效，详见 VERIFY.md。
+
 ## 0.8.7 — 2026-09-26
 - 新增“用量统计”页：按当前账号、模型、UTC 今天/近 7 天/近 30 天查看输入、输出、缓存与推理 Token，显示每日趋势、成功/失败、最近 100 条明细，支持汇总与明细 CSV 导出。
 - 直接观察 Messages / Responses / compact 上游 usage；不改写回复、不新增推理，累计事件不重复相加，断流/缺失字段显示部分或未知用量。各账号分目录持久化 30 天，容量上限、损坏行和落盘异常明确提示。

@@ -65,11 +65,11 @@ test('identity prompt only for Claude, retry safety net, fallback detection, exa
     assert.ok(!r.raw.includes(Buffer.from([0xef, 0xbf, 0xbd])), 'no U+FFFD replacement characters');
     assert.ok(r.raw.toString('utf8').includes(JSON.stringify(text).slice(1, -1)), 'text arrives byte-for-byte');
   });
-  await t.test('if relay starts requiring the identity block, one retry injects it', async () => {
+  await t.test('a generic GPT rejection never triggers Claude identity injection or replay', async () => {
     mode = 'strict'; seen = [];
-    assert.equal((await call('gpt-6-astra')).status, 200);
-    assert.deepEqual(seen.map((s) => hasCC(s.system)), [false, true]);
-    assert.equal(ctx.counters.cc_retried, 1);
+    assert.equal((await call('gpt-6-astra')).status, 400);
+    assert.deepEqual(seen.map((s) => hasCC(s.system)), [false]);
+    assert.equal(ctx.counters.cc_retried, 0);
     mode = 'ok';
   });
   await t.test('observe: a substituted model is counted and forwarded', async () => {

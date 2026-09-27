@@ -32,7 +32,7 @@ $sourceFiles = @(
     'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js',
     'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md', 'tests/web-panel.test.js', 'scripts/verify-package.py', 'RECOVERY.md', 'tests/test_release_source.py', 'UPDATE-TROUBLESHOOTING.md',
     'lib/membership.js', 'lib/window-keeper.js', 'tests/membership-window.test.js', 'MEMBERSHIP-WINDOWS.md',
-    'lib/usage.js', 'tests/usage.test.js', 'USAGE.md'
+    'lib/usage.js', 'tests/usage.test.js', 'USAGE.md', 'tests/gpt-fidelity.test.js'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

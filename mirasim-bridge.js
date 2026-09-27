@@ -28,7 +28,7 @@ const { summarizeMembership } = require('./lib/membership');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.8.7';
+const VERSION = '0.8.8';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -106,6 +106,7 @@ const DEFAULT_CONFIG = {
     // 上游暂时无容量的型号仍会在页面标为“已发现”，可单独停用而不丢失目录信息。
     disabled_models: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'],
     kimi_default_effort: 'low',
+    gpt_default_effort: 'high', // Responses only; explicit effort/history controls take priority.
     // relay 只对 Claude 模型强制要求 Claude Code 身份提示词（2026-09-26 实测：Kimi 不带也 200，
     // GPT/DeepSeek 不带时回 503 而非 400）。给其他模型注入会让它们自称 "Claude Code"。
     cc_identity_models: '^claude-',
@@ -286,6 +287,7 @@ function validateConfig(cfg) {
   if (cfg.shutdown.total_timeout_sec <= cfg.shutdown.drain_timeout_sec) throw new Error('shutdown.total_timeout_sec 必须大于 drain_timeout_sec');
   if (!Array.isArray(cfg.constraints.disabled_models) || cfg.constraints.disabled_models.some((s) => typeof s !== 'string' || !s.trim())) throw new Error('disabled_models 必须是模型 ID 数组');
   if (!['', 'low', 'high', 'max'].includes(cfg.constraints.kimi_default_effort)) throw new Error('kimi_default_effort 必须为空/low/high/max');
+  if (!['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(cfg.constraints.gpt_default_effort)) throw new Error('gpt_default_effort 必须为空/low/medium/high/xhigh/max');
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
   if (typeof cfg.membership.enabled !== 'boolean' || !Number.isInteger(cfg.membership.interval_sec) || cfg.membership.interval_sec < 60) throw new Error('membership 需要布尔开关和至少 60 秒的查询间隔');
   windowKeeper.validateConfig(cfg.window_keeper);
@@ -1676,7 +1678,7 @@ function newAccountCtx(key) {
     counters: {
       total: 0, ok: 0, err: 0, rejected: 0, injected: 0,
       sampling_retried: 0,
-      cc_retried: 0,            // 非 Claude 模型未带身份块被拒、注入后重试的次数
+      cc_retried: 0,            // 兼容历史计数；不会为非 Claude 模型重试注入身份
       fallback: 0,              // relay 用其他模型顶替本轮的次数（响应 model 与请求不同）
       models_filtered: 0,       // /v1/models 响应里被白名单/黑名单滤掉的模型数
       sanitized: {},            // 约束清洗动作计数，键见 sanitizeMessagesRequest 的 notes
@@ -2269,6 +2271,12 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   const startedAt = Date.now();
   let ttfbMs = null, outcome = null, cleanBody = null;
   let usage = null, attempts = 0;
+  let gptEffortSource = null, reportedEffort = null;
+  const observeUsage = (event, type) => {
+    usage?.accept(event, type);
+    const effort = event?.response?.reasoning?.effort;
+    if (typeof effort === 'string' && effort.length <= 32) reportedEffort = effort;
+  };
   const countOk = () => { ctx.counters.ok++; outcome = 'ok'; };
   const countErr = () => { ctx.counters.err++; outcome = 'err'; };
   try {
@@ -2318,8 +2326,11 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   let responsesStream = true;
   if (req.method === 'POST' && isResponses) {
     try {
-      const normalized = normalizeResponses(JSON.parse(body.toString('utf8')), {
+      const original = JSON.parse(body.toString('utf8'));
+      gptEffortSource = original?.reasoning?.effort != null ? 'client' : Array.isArray(original?.input) && original.input.some(i => i?.type === 'configuration_update' && i.reasoning?.effort != null) ? 'history' : cfg.constraints.gpt_default_effort ? 'account_default' : 'upstream_default';
+      const normalized = normalizeResponses(original, {
         compact: wirePath.endsWith('/compact'), allowed: (id) => isModelAllowed(id, cfg),
+        defaultEffort: cfg.constraints.gpt_default_effort,
       });
       responsesStream = normalized.downstreamStream;
       cleanBody = normalized.body;
@@ -2398,20 +2409,13 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     return fail503(res, `upstream error: ${err.code || err.message}`);
   }
 
-  const missingCC = cleanBody && pathname === '/v1/messages' && !hasCC(cleanBody.system);
-  if (upRes.statusCode === 400 && cleanBody && (hadSampling || missingCC)) {
+  if (upRes.statusCode === 400 && cleanBody && hadSampling) {
     const firstError = await readStreamText(upRes);
     if (hadSampling && /temperature|top_p|top_k/i.test(firstError) && !/credit balance/i.test(firstError)) {
       // 仅在明确指出采样参数时重试一次，含混 400 不自动重放。
       delete cleanBody.temperature; delete cleanBody.top_p; delete cleanBody.top_k;
       upRes = await sendOnce(Buffer.from(JSON.stringify(cleanBody)));
       ctx.counters.sampling_retried++;
-    } else if (missingCC && /rejected as invalid/i.test(firstError)) {
-      // relay 若日后也要求非 Claude 模型带身份块，这里自愈一次，而不是让请求失败。
-      cleanBody = injectCC(cleanBody);
-      upRes = await sendOnce(Buffer.from(JSON.stringify(cleanBody)));
-      ctx.counters.cc_retried = (ctx.counters.cc_retried || 0) + 1;
-      warn(`${cleanBody.model} 未带身份提示词被拒，已注入后重试（考虑把它加入 constraints.cc_identity_models）`);
     } else {
       if (/credit balance/i.test(firstError)) {
         ctx.backoffUntil = Math.max(ctx.backoffUntil, Date.now() + cfg.backoff.max_sec * 1000);
@@ -2503,8 +2507,9 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     const raw = await readStreamText(upRes);
     // Observe the upstream frames even when aggregation fails or the model is refused.
     if (raw.trimStart().startsWith('{')) { try { usage?.json(JSON.parse(raw)); } catch {} }
-    else { try { new TerminalEvents('responses', (e, type) => usage?.accept(e, type)).push(Buffer.from(raw)); } catch {} }
+    else { try { new TerminalEvents('responses', observeUsage).push(Buffer.from(raw)); } catch {} }
     const response = aggregateResponses(raw);
+    observeUsage({ response });
     if (noteServedModel(ctx, cfg, cleanBody?.model, response.model)) {
       countErr();
       return fail503(res, 'upstream_stream_model_fallback');
@@ -2533,7 +2538,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
         begin: () => res.writeHead(status, eventHeaders),
         firstEventTimeoutMs: cfg.forward.upstream_headers_timeout_ms,
         onServed: (served) => noteServedModel(ctx, cfg, cleanBody?.model, served),
-        onEvent: (e, type) => usage?.accept(e, type),
+        onEvent: observeUsage,
       });
       if (ok) countOk();
       else { countErr(); record('upstream_stream_error'); }
@@ -2581,6 +2586,15 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     res.removeListener('close', abort);
     controller.abort();
     if (usage && attempts) {
+      if (modelFamily(cleanBody.model) === 'gpt') ctx.lastGptRequest = {
+        at: new Date().toISOString(), protocol: usage.protocol, requested: cleanBody.model, served: usage.served,
+        sent_effort: cleanBody.reasoning?.effort || cleanBody.output_config?.effort || null,
+        effort_source: gptEffortSource || 'messages', reported_effort: reportedEffort, ok: outcome === 'ok',
+        input_items: Array.isArray(cleanBody.input) ? cleanBody.input.length : cleanBody.messages?.length || 0,
+        max_output_tokens: cleanBody.max_output_tokens ?? cleanBody.max_tokens ?? null,
+        context_management: Boolean(cleanBody.context_management), previous_response: Boolean(cleanBody.previous_response_id),
+        reasoning_tokens: usage.snapshot().reasoning_tokens,
+      };
       // The response is already delivered. Accounting failure must not affect it.
       await usageStoreFor(cfg, ctx).record({ model: cleanBody.model, served_model: usage.served, protocol: usage.protocol,
         ok: outcome === 'ok', status: res.headersSent ? res.statusCode : null, elapsed_ms: Date.now() - startedAt, attempts, ...usage.snapshot() });
@@ -3229,7 +3243,7 @@ async function checkDiagnosticModel(target, model, args) {
   if (modelFamily(model) === 'kimi') payload.output_config = { effort: 'low' };
   const protocol = args.flags.protocol || (target.backend === 'relay' && modelFamily(model) === 'gpt' ? 'responses' : 'messages');
   if (!['messages', 'responses'].includes(protocol)) throw new Error('--protocol 必须是 messages 或 responses');
-  if (protocol === 'responses') payload = { model, stream: true, store: false, input: 'Reply only OK.', max_output_tokens: maxTokens };
+  if (protocol === 'responses') payload = { model, stream: true, store: false, reasoning: { effort: 'low' }, input: 'Reply only OK.', max_output_tokens: maxTokens };
   const started = Date.now();
   try { return { model, family: modelFamily(model), protocol, ...summarizeModelResponse(await diagnosticRequest(target, '/v1/' + protocol, payload, { timeoutMs: timeoutSec * 1000 })) }; }
   catch (err) { return { model, family: modelFamily(model), protocol, ok: false, status: 0, ttfb_ms: err.ttfb_ms ?? null, elapsed_ms: Date.now() - started, error: err.message, timeout_sec: timeoutSec }; }

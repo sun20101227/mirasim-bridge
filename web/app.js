@@ -423,6 +423,20 @@ function renderLatency(latency) {
   }
 }
 
+function renderGptRequest(data) {
+  renderChanged('gpt-request', [identity(), data], box => {
+    box.replaceChildren();
+    if (!data) { box.append(node('strong', '尚无 GPT 请求记录')); return; }
+    const sources = { client: '客户端指定', history: '由历史中的 configuration_update 控制', account_default: '账号默认', upstream_default: '上游默认', messages: 'Messages 协议' };
+    box.append(node('strong', `${data.protocol} · ${data.ok ? '完成' : '失败/中断'}`),
+      node('span', `请求 ${data.requested} → 上游报告 ${data.served || '未知'}`),
+      node('span', `发送推理档 ${data.sent_effort || '未设置'}（${sources[data.effort_source] || '未知来源'}）· 上游报告 ${data.reported_effort || '未提供'}`),
+      node('span', `历史条目 ${data.input_items} · 输出上限 ${data.max_output_tokens ?? '未设置'} · 推理 Token ${data.reasoning_tokens ?? '未提供'}`),
+      node('span', `上下文压缩 ${data.context_management ? '已透传' : '未设置'} · previous_response_id ${data.previous_response ? '已透传' : '未设置'} · ${new Date(data.at).toLocaleString()}`));
+    if (data.protocol === 'messages') box.append(node('span', '当前经过 Messages 协议；Codex 请检查 sub2 分组和专用账号接法。'));
+  });
+}
+
 async function overview() {
   const read = beginRead('overview');
   const memberRead = beginRead('membership', read.scope);
@@ -434,6 +448,7 @@ async function overview() {
   if (!read.valid()) return;
   const sub = runtime.sub2api || {};
   if (memberRead.valid()) renderMembership(runtime.membership);
+  renderGptRequest(runtime.last_gpt_request);
   bridgeVersion = runtime.version || null;
   stat('stat-version', runtime.version || '未知');
   $('current-version').textContent = runtime.version || '—'; $('aside-version').textContent = runtime.version ? `bridge ${runtime.version}` : '';
@@ -465,6 +480,7 @@ async function overview() {
     if (s.kimi_max_concurrency) $('kimi-concurrency').value = s.kimi_max_concurrency;
     if (s.model_fallback) $('model-fallback').value = s.model_fallback;
     if (s.kimi_default_effort !== undefined) $('kimi-effort').value = s.kimi_default_effort;
+    if (s.gpt_default_effort !== undefined) $('gpt-effort').value = s.gpt_default_effort;
   }
   if (view !== 'overview') { markRefreshed(); return; }
   renderChanged('trend', [identity(read.scope), runtime.history, Math.floor(Date.now() / 60000)], () => renderTrend(runtime.history));
@@ -898,6 +914,7 @@ async function refresh() {
 function setSelectedAccount(scope) {
   const changed = !sameAccount(scope);
   selected = { ...scope }; $('target').value = identity(); hideAccess();
+  if (changed) renderGptRequest(null);
   if (changed) { dirtyForms.clear(); modelsFor = ''; keeperModelsFor = ''; }
   if (changed) {
     usageFor = ''; usageData = null; $('usage-content').hidden = true; $('usage-state').textContent = '正在读取当前账号的用量…';
@@ -1013,7 +1030,7 @@ $('follow-latest').addEventListener('click', guarded(async () => {
 }));
 $('settings-form').addEventListener('submit', guarded(async () => {
   const scope = { ...selected };
-  const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value, kimi_default_effort: $('kimi-effort').value });
+  const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value, kimi_default_effort: $('kimi-effort').value, gpt_default_effort: $('gpt-effort').value });
   const r = await api('settings', data, scope.target);
   if (!sameAccount(scope)) return;
   dirtyForms.delete('settings-form');

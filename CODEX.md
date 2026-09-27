@@ -1,5 +1,17 @@
 # 用 Codex 接入 Mirasim GPT 模型
 
+## 0.8.8 的 GPT 修复与排查
+
+升级至 0.8.8 后，桥接器会保留输出 Token 上限、自动上下文压缩设置、显式存储设置，以及推理/工具/压缩历史。旧版会删掉其中一部分参数，非流式聚合也可能漏掉终止快照以外的推理项。这些处理会影响会话连续性，已修复。
+
+网页“账号管理 → 运行设置”新增 **GPT 默认推理档**：默认 `high`，仅在客户端没有指定 `reasoning.effort`、历史也没有档位更新时生效；可以选择“不干预”。客户端显式设置 `low` 时仍发送 `low`，不会强制改成 high。更高推理档可能增加耗时与 Token 消耗；不要把连通性测试使用的 low 当成业务默认。
+
+“最近 GPT 请求”卡片会显示协议、发出的推理档及来源、上游报告的档位、输入条目数、输出上限和推理 Token。如果卡片显示 Messages，请检查下文 OpenAI 分组接法；桥接器无法恢复 sub2 在到达它之前已转换或丢弃的字段。这里也不能替客户端授予本机沙箱或审批权限。
+
+已实测 Mirasim 接受 `max_output_tokens`、`context_management` 和 `store:true`。它仍要求 Responses `stream:true` 与数组输入，桥接器保留这两项必要适配。`truncation:disabled` 以省略实现，`truncation:auto` 明确报错，避免静默改变上下文策略。Mirasim 本次测试拒绝 `ultra`，继续按现有兼容规则映射为 `max`；其他显式档位透传，可用性由上游模型决定。
+
+建议用上游返回的 reasoning/compaction 项完整续传工具历史，不要只保留可见文本。[OpenAI 推理模型说明](https://developers.openai.com/api/docs/guides/reasoning)；自动压缩参数含义见 [OpenAI 上下文压缩说明](https://developers.openai.com/api/docs/guides/compaction)。Mirasim 是独立上游，不能据此推断它支持所有官方能力。
+
 ## 为什么原来的接法会出问题
 
 把 Codex 接到 **anthropic 平台分组**（例如原来的 `mirasim` 分组 15）时，请求链路是：
@@ -60,7 +72,7 @@ env_key = "SUB2_API_KEY"
 2. 分别在“完全访问权限”和“替我审批”模式下执行一条需要审批的命令，确认审批流程正常。
 3. 在网页后台概览查看“模型被替换”计数。如果大于 0，说明 relay 在额度不足时用别的模型顶替过；可在“账号管理 → 运行设置”里改为“中断本轮”。
 
-以上三项需要在你的服务器和 Codex 客户端上完成。2026-09-26 本机测试时，GPT 系列在 Messages 接口返回 `no upstream available`；原生 Responses 路径的实际可用性，需要在服务器上确认。
+以上三项需要在你的服务器和 Codex 客户端上完成。2026-09-26 本机 GPT Messages 曾返回 `no upstream available`；2026-09-27 本机实际 relay + bridge 的原生 Responses 已通过 gpt-6-astra 多轮和工具续答测试，详见 [VERIFY.md](VERIFY.md)。这不代表已经验证你的 sub2 分组、客户端权限或服务器部署。
 
 ## 乱码（锟斤拷）和缺括号
 

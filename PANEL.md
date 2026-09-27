@@ -1,4 +1,6 @@
-# Mira 网页管理后台（0.8.7）
+# Mira 网页管理后台（0.8.8）
+
+0.8.8 的账号页新增 **GPT 默认推理档** 和 **最近 GPT 请求**。默认 high 仅在客户端没有指定推理档时使用，可改成“不干预”；更高档可能增加耗时与 Token。诊断卡显示实际发送的档位、来源、上游报告的模型/档位、输出上限和推理 Token，便于确认是否走错 Messages 协议或客户端仍设置 low。详情见 [CODEX.md](CODEX.md)。
 
 > 0.8.7：检测结果在对应区域自动更新，无需刷新整个页面。普通页面约 15 秒查询状态；正在运行的账号检测、窗口任务、升级约 2 秒跟踪一次，模型目录约 30 秒更新。轮询只读取状态，不会反复发送 `hi` 或模型测试。未保存的表单输入会保留；切到浏览器后台暂停轮询，回来后立即同步。
 
@@ -27,13 +29,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.7/mirasim-bridge-0.8.7-source.zip \
-  -o mirasim-bridge-0.8.7-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.8/mirasim-bridge-0.8.8-source.zip \
+  -o mirasim-bridge-0.8.8-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.7/mirasim-bridge-0.8.7-source.zip.sha256 \
-  -o mirasim-bridge-0.8.7-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.7-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.7-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.8/mirasim-bridge-0.8.8-source.zip.sha256 \
+  -o mirasim-bridge-0.8.8-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.8-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.8-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
