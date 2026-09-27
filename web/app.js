@@ -5,6 +5,7 @@ let key = '', loginSession = null, timer = null, polling = false, noticeTimer = 
 let selected = { target: 'main', account: 'main' };
 let fleetRows = [], bridgeVersion = null, modelRows = [], modelsFor = '', groupsCache = null;
 let actionsBusy = 0, accessHideTimer = null, accessFor = '', loginFinishing = false;
+let importedCredential = null, credentialReadVersion = 0, importRequest = null;
 const connectionResults = new Map();
 let keeperModelsFor = '';
 const renderCache = new WeakMap(), readVersions = new Map(), dirtyForms = new Map();
@@ -103,7 +104,7 @@ const KNOWN = ['claude', 'gpt', 'deepseek', 'kimi'];
 const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi', glm: 'GLM', other: '其他' };
 const familyName = (f) => FAMILY_NAMES[f] || (f ? f.charAt(0).toUpperCase() + f.slice(1) : '其他');
 const familyOrder = (f) => (KNOWN.includes(f) ? KNOWN.indexOf(f) : 10);
-const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '运行设置', codex: 'Codex 账号', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
+const ACTIONS = { deploy: '升级', rollback: '回退', start: '启动容器', stop: '停止容器', attach: '启动独立容器', 'account/host': '托管账号', 'account/import': '导入账号', 'account/unhost': '移出托管', 'account/pause': '暂停调度', 'account/resume': '恢复调度', model: '模型启停', 'models/family': '系列启停', settings: '运行设置', codex: 'Codex 账号', test: '模型测试', 'login/start': '发起登录', 'login/complete': '完成登录' };
 const SCHED = { on: ['已入池', 'ok'], off: ['已暂停', 'warn'], unmanaged: ['未接管', ''], unknown: ['等待确认', 'warn'] };
 Object.assign(ACTIONS, { 'account/access': '查看接入密钥', 'account/check': '检测账号连接' });
 Object.assign(ACTIONS, { 'membership/refresh': '查询会员状态', 'window-keeper': '窗口任务设置', 'window-keeper/check': '检查额度窗口' });
@@ -1057,14 +1058,30 @@ for (const action of ['deploy', 'rollback']) $(action).addEventListener('click',
 $('deploy-status').addEventListener('click', guarded(deployment));
 $('new-account').addEventListener('click', guarded(async () => {
   if (loginSession) { $('account-dialog').showModal(); return; }
-  $('account-form').reset(); $('complete-box').hidden = true; $('begin-login').disabled = false; providerChanged(); $('account-dialog').showModal();
+  $('account-form').reset(); clearImport(); $('complete-box').hidden = true; $('begin-login').disabled = false; providerChanged(); $('account-dialog').showModal();
   try { await groups(); } catch { /* 分组读不到时手动输入 */ }
   const first = (groupsCache || []).find((g) => ['anthropic', 'composite'].includes(g.platform));
   fillGroups($('group-select'), ['anthropic', 'composite'], first ? first.id : '', '手动输入 ID…'); groupChanged();
 }));
 function groupChanged() { $('group-manual').hidden = Boolean($('group-select').value); }
 $('group-select').addEventListener('change', groupChanged);
-$('close-dialog').addEventListener('click', () => $('account-dialog').close());
+$('close-dialog').addEventListener('click', () => { clearImport(); $('account-dialog').close(); });
+$('account-dialog').addEventListener('cancel', clearImport);
+function clearImport() {
+  credentialReadVersion++; importedCredential = null; importRequest = null;
+  $('credential-file').value = ''; $('import-status').textContent = '';
+}
+function portableUpload(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || data.type !== undefined && data.type !== 'mirasim') throw Error('只支持 Mirasim 凭证 JSON 对象');
+  const flat = data.type === 'mirasim' || Object.hasOwn(data, 'access_token') || Object.hasOwn(data, 'device_private_key');
+  const credential = flat ? { type: 'mirasim', access_token: data.access_token, refresh_token: data.refresh_token, device_private_key: data.device_private_key, expired: data.expired }
+    : { auth: { token: data.auth?.token, refreshToken: data.auth?.refreshToken, exp: data.auth?.exp }, device: { privateKey: data.device?.privateKey } };
+  const values = flat ? [credential.access_token, credential.refresh_token, credential.device_private_key] : [credential.auth.token, credential.auth.refreshToken, credential.device.privateKey];
+  if (!values.every(v => typeof v === 'string' && v.length)) throw Error('文件缺少访问令牌、刷新令牌或设备私钥');
+  if (values.some(v => v.startsWith('mrs1:'))) throw Error('请先在原登录设备导出 portable JSON，不能直接导入加密文件');
+  if (JSON.stringify(credential).length > 70000) throw Error('凭证字段过大，请重新导出文件');
+  return credential;
+}
 function providerChanged() {
   const email = $('provider').value === 'email', hosted = $('hosted').checked;
   $('email-field').hidden = !email; $('email').required = email;
@@ -1072,6 +1089,16 @@ function providerChanged() {
   $('begin-login').textContent = email ? '发送验证码' : `生成 ${$('provider').value === 'github' ? 'GitHub' : 'Google'} 授权链接`;
 }
 $('provider').addEventListener('change', providerChanged); $('hosted').addEventListener('change', providerChanged); providerChanged();
+$('credential-file').addEventListener('change', async () => {
+  const version = ++credentialReadVersion, file = $('credential-file').files?.[0]; importedCredential = null; importRequest = null;
+  if (!file) { $('import-status').textContent = ''; return; }
+  if (file.size > 512 * 1024) { $('import-status').textContent = '文件过大，凭证 JSON 不能超过 512 KB。'; return; }
+  try {
+    const raw = await file.text(); if (version !== credentialReadVersion) return;
+    let data; try { data = JSON.parse(raw.replace(/^\uFEFF/, '')); } catch { throw Error('JSON 格式无效，请重新导出完整文件'); }
+    importedCredential = portableUpload(data); $('import-status').textContent = '凭证文件已读取，点击“导入 JSON 凭证”后才会验证和保存。';
+  } catch (err) { if (version === credentialReadVersion) $('import-status').textContent = err.message; }
+});
 $('email').addEventListener('blur', () => {
   const field = $('profile');
   if (field.value.trim() && /^[a-z][a-z0-9_-]{0,39}$/.test(field.value.trim())) return;
@@ -1100,6 +1127,7 @@ $('account-form').addEventListener('submit', guarded(async () => {
   const groupId = Number($('group-select').value) || Number($('group-id').value);
   if (!groupId) throw Error('请选择分组，或填写分组 ID');
   data.group_id = groupId;
+  clearImport();
   const r = await api('login/start', data, 'main'); loginSession = { ...r, profile: data.profile, hosted }; $('complete-box').hidden = false;
   $('oauth-link').hidden = !['google', 'github'].includes(data.provider);
   $('oauth-link').textContent = `打开 ${data.provider === 'github' ? 'GitHub' : 'Google'} 授权页面 ↗`;
@@ -1108,13 +1136,45 @@ $('account-form').addEventListener('submit', guarded(async () => {
   $('code').type = 'password'; $('code').value = ''; $('code').placeholder = data.provider === 'email' ? '邮箱验证码' : '完整回调 URL'; $('login-message').textContent = '';
   $('complete-prompt').textContent = data.provider === 'email' ? '邮箱验证码' : '完整回调 URL（包含 access_token 与 state）';
 }));
+function importAccountDraft() {
+  let profile = $('profile').value.trim().toLowerCase();
+  if (!profile) profile = 'mira-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  if (profile.includes('@')) profile = ('mira-' + profile.replace(/[^a-z0-9_-]+/g, '-')).slice(0, 40);
+  if (!/^[a-z][a-z0-9_-]{0,39}$/.test(profile)) throw Error('Profile 只能以小写字母开头，并包含小写字母、数字、下划线或短横线');
+  const accountName = $('account-name').value.trim();
+  if (!accountName) throw Error('请填写 sub2 账号名');
+  const hosted = $('hosted').checked, groupId = Number($('group-select').value) || Number($('group-id').value);
+  if (!groupId) throw Error('请选择分组，或填写分组 ID');
+  $('profile').value = profile;
+  const data = { profile, account_name: accountName, hosted, group_id: groupId };
+  if (!hosted) { data.port = Number($('port').value) || undefined; data.public_base_url = $('base-url').value; }
+  return data;
+}
+$('import-json').addEventListener('click', guarded(async () => {
+  if (!importedCredential) throw Error('请先选择凭证 JSON 文件');
+  if (loginSession) throw Error('请先完成当前登录，或关闭后重新开始');
+  const data = importAccountDraft();
+  const signature = JSON.stringify(data);
+  if (!importRequest || importRequest.signature !== signature) importRequest = { signature, id: crypto.randomUUID() };
+  const r = await api('account/import', { ...data, request_id: importRequest.id, credential: importedCredential }, 'main');
+  clearImport();
+  if (data.hosted) {
+    try {
+      const h = await api('account/host', { profile: r.profile }, 'main');
+      setSelectedAccount({ target: 'main', account: r.profile });
+      notice(`账号 ${r.profile} 已导入并托管${h.registered ? `，sub2 账号 ${h.account_name} 已注册` : '，sub2 注册将在健康检查中完成'}。`);
+    } catch (err) { notice(`账号 ${r.profile} 已导入，但托管失败：${err.message}`, true); }
+  } else notice(`账号 ${r.profile} 已导入保存。`);
+  $('account-dialog').close();
+  try { await refresh(); } catch { notice(`账号 ${r.profile} 已导入；状态读取暂不可用，请稍后刷新。`, true); }
+}));
 async function finishLogin(r, session) {
   if (loginFinishing || loginSession !== session) return;
   loginFinishing = true;
-  $('code').value = ''; loginSession = null; $('complete-box').hidden = true; $('account-dialog').close();
+  $('code').value = ''; loginSession = null; clearImport(); $('complete-box').hidden = true; $('account-dialog').close();
   try {
   if (session.hosted) {
-    try { const h = await api('account/host', { profile: r.profile }, 'main'); selected = { target: 'main', account: r.profile }; notice(`回调已收到，账号 ${r.profile} 已保存并托管${h.registered ? `，sub2 账号 ${h.account_name} 已注册` : '，sub2 注册将在健康检查中完成'}。`); }
+    try { const h = await api('account/host', { profile: r.profile }, 'main'); setSelectedAccount({ target: 'main', account: r.profile }); notice(`登录凭证已收到，账号 ${r.profile} 已保存并托管${h.registered ? `，sub2 账号 ${h.account_name} 已注册` : '，sub2 注册将在健康检查中完成'}。`); }
     catch (e) { notice(`账号 ${r.profile} 已保存，但托管失败：${e.message}。可在 profiles 列表重试。`, true); }
   } else notice(`账号 ${r.profile} 已独立保存。${host ? '点击 profiles 列表中的“独立容器”。' : '请启动对应 profile 容器。'}`);
   try { await refresh(); } catch { notice(`账号 ${r.profile} 已保存；页面刷新未完成，请稍后点刷新。`, true); }
@@ -1123,16 +1183,25 @@ async function finishLogin(r, session) {
 async function queryLogin() {
   const session = loginSession;
   if (!session || loginFinishing) return;
+  if (session.expires_at && Date.parse(session.expires_at) <= Date.now()) { loginSession = null; $('code').value = ''; $('complete-box').hidden = true; notice('登录已过期，请重新发送验证码或发起授权', true); return; }
   const r = await api('login/status', { id: session.id }, 'main');
+  if (loginSession !== session) return;
   if (r.stage === 'saved') return finishLogin(r, session);
-  $('login-message').textContent = { waiting: '本次登录仍在等待回调，请粘贴授权后的完整地址并提交。', validating: '回调已收到，正在验证并保存账号，请勿重复授权。', failed: '回调验证或保存未完成，原账号未修改。' }[r.stage] || '正在查询登录状态';
+  if (r.stage === 'failed') { loginSession = null; $('code').value = ''; $('complete-box').hidden = true; notice('登录校验或保存未完成，请重新发起；原账号未修改。', true); return; }
+  $('login-message').textContent = r.stage === 'waiting' ? (session.provider === 'email' ? '等待邮箱验证码，请填写收到的验证码。' : '等待授权回调，请粘贴完整地址并提交。') : '正在验证并保存账号，请勿重复提交。';
 }
+$('cancel-login').addEventListener('click', guarded(async () => {
+  const session = loginSession; if (!session) return;
+  const r = await api('login/cancel', { id: session.id }, 'main');
+  if (r.saved) return finishLogin(r, session);
+  if (loginSession === session) { loginSession = null; $('code').value = ''; $('complete-box').hidden = true; notice('本次登录已取消。重新发送验证码仍需遵守发送间隔。'); }
+}));
 $('login-status').addEventListener('click', guarded(queryLogin));
 $('complete-form').addEventListener('submit', guarded(async () => {
   const session = loginSession;
   if (!session) throw Error('请先发起登录');
   const data = { id: session.id }; data[session.provider === 'email' ? 'code' : 'callback'] = $('code').value.trim();
-  $('login-message').textContent = '正在提交回调并校验账号…';
+  $('code').value = ''; $('login-message').textContent = '正在提交并校验账号…';
   let r;
   try { r = await api('login/complete', data, 'main'); }
   catch (err) {

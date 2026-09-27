@@ -105,6 +105,24 @@ class PanelHostTests(unittest.TestCase):
         console.call({'operation': 'login/start', 'data': {'hosted': True, 'profile': 'github-account', 'provider': 'github'}})
         self.assertEqual(calls[0]['data']['provider'], 'github')
 
+    def test_import_uses_main_topology_mutation_lock_and_safe_audit(self):
+        calls = []
+        console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append((argv, data)) or {'saved': True})
+        console.topology = lambda: ({}, 'sub2-default')
+        data = {'profile': 'imported', 'hosted': False, 'port': 9000, 'credential': {'access_token': 'PRIVATE'}}
+        self.assertTrue(console.call({'operation': 'account/import', 'data': data})['saved'])
+        self.assertEqual(calls[0][1]['data']['public_base_url'], 'http://mirasim-imported:8787')
+        self.assertNotIn('PRIVATE', json.dumps(console.events))
+        self.assertNotIn('PRIVATE', ' '.join(calls[0][0]))
+        with self.assertRaisesRegex(ValueError, 'main account'):
+            console.call({'operation': 'account/import', 'target': 'second', 'data': data})
+        self.agent.lock.acquire()
+        try:
+            with self.assertRaises(ValueError):
+                console.call({'operation': 'account/import', 'data': data})
+        finally:
+            self.agent.lock.release()
+
     def test_usage_read_is_available_during_deployment_and_pricing_is_a_mutation(self):
         calls = []
         console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append(data) or {'ok': True})

@@ -145,12 +145,52 @@ for (const provider of ['google', 'github']) test(`browser shows ${provider} lin
   assert.match(p.get('login-hint').textContent, /127\.0\.0\.1/);
 });
 
-test('HTML offers Google and GitHub and disables unavailable email; profile validation does not preempt normalization', () => {
+test('HTML offers Google, GitHub, email OTP and JSON credential import; profile validation does not preempt normalization', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   assert.match(html, /<option value="github">GitHub/);
-  assert.match(html, /<option value="email" disabled>/);
+  assert.match(html, /<option value="email">邮箱验证码/);
+  assert.match(html, /id="credential-file"[^>]*type="file"/);
+  assert.match(html, /id="import-json"/);
   const field = html.match(/<input id="profile"[^>]*>/)[0];
   assert.ok(!field.includes('required') && !field.includes('pattern='));
+});
+test('email provider switches to OTP wording and keeps import separate from login', () => {
+  const p = page(() => ({}));
+  p.get('provider').value = 'email'; p.run('providerChanged()');
+  assert.equal(p.get('begin-login').textContent, '发送验证码');
+  assert.equal(p.get('email-field').hidden, false); assert.equal(p.get('email').required, true);
+  assert.equal(typeof p.get('import-json').events.click, 'function');
+});
+
+test('email login sends OTP fields, never asks for a callback, cancels and clears the submitted code', async () => {
+  const p=page(({operation})=>operation==='login/start'?{id:'email-id',provider:'email',hosted:true}:operation==='login/status'?{stage:'waiting'}:operation==='login/cancel'?{cancelled:true}:{saved:true,profile:'otp'});
+  p.get('provider').value='email';p.get('email').value='user@example.com';p.get('account-name').value='otp';p.get('group-select').value='15';p.get('hosted').checked=true;
+  await p.get('account-form').events.submit({preventDefault(){}});
+  await p.run('queryLogin()');assert.match(p.get('login-message').textContent,/等待邮箱验证码/);assert.equal(p.get('oauth-link').hidden,true);
+  p.run('finishLogin = async () => {};');p.get('code').value='123456';await p.get('complete-form').events.submit({preventDefault(){}});
+  assert.equal(p.calls.find(c=>c.operation==='login/complete').data.code,'123456');assert.equal(p.get('code').value,'');
+  await p.get('cancel-login').events.click({preventDefault(){}});assert.equal(p.run('loginSession'),null);
+});
+test('credential reader strips fields before upload, handles BOM, suppresses JSON excerpts and discards stale reads', async () => {
+  const p=page(()=>({}));
+  const raw={type:'mirasim',access_token:'dummy-access',refresh_token:'dummy-refresh',device_private_key:'dummy-key',email:'PRIVATE_MAIL',admin_api_key:'PRIVATE_ADMIN',relay_url:'https://evil.invalid'};
+  p.get('credential-file').files=[{size:400,text:async()=> '\uFEFF'+JSON.stringify(raw)}];
+  await p.get('credential-file').events.change();assert.doesNotMatch(p.run('JSON.stringify(importedCredential)'),/PRIVATE|evil/);
+  assert.equal(p.calls.length,0);
+  p.get('credential-file').files=[{size:40,text:async()=>'{"access_token":"PRIVATE_RAW",'}];
+  await p.get('credential-file').events.change();assert.doesNotMatch(p.get('import-status').textContent,/PRIVATE_RAW/);assert.equal(p.run('importedCredential'),null);
+  let release;p.get('credential-file').files=[{size:400,text:()=>new Promise(r=>{release=r;})}];
+  const old=p.get('credential-file').events.change();p.run('clearImport()');release(JSON.stringify(raw));await old;
+  assert.equal(p.run('importedCredential'),null);
+});
+test('lost JSON import response retries the same request and independent profiles do not become selected hosted accounts', async () => {
+  let first=true;
+  const p=page(({operation})=>{if(operation==='account/import'){if(first){first=false;throw Error('lost response');}return {profile:'imported',saved:true,hosted:false};}throw Error('unexpected '+operation);});
+  p.run("importedCredential = {type:'mirasim',access_token:'test',refresh_token:'refresh',device_private_key:'key'}; refresh = async () => {};");
+  p.get('profile').value='imported';p.get('account-name').value='imported';p.get('group-select').value='15';p.get('hosted').checked=false;p.get('port').value='8788';p.get('base-url').value='';
+  await p.get('import-json').events.click({preventDefault(){}});await p.get('import-json').events.click({preventDefault(){}});
+  assert.equal(p.calls[0].data.request_id,p.calls[1].data.request_id);assert.equal(p.calls.length,2);
+  assert.equal(p.run('selected.account'),'main');assert.equal(p.run('importedCredential'),null);
 });
 
 test('accepted deployment is not labelled completed and detailed recovery failures stay visible', async () => {
@@ -187,7 +227,7 @@ for (const stage of ['saved', 'validating']) test(`lost callback response is rec
   if (stage === 'saved') {
     assert.equal(p.run('loginSession'), null); assert.equal(p.get('code').value, '');
     assert.equal(p.run('selected.account'), 'second');
-    assert.match(p.get('notice-text').textContent, /回调已收到/);
+    assert.match(p.get('notice-text').textContent, /登录凭证已收到/);
   } else {
     assert.match(p.get('login-message').textContent, /回调已收到/);
     assert.equal(p.calls.length, 2);

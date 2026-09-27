@@ -1,6 +1,12 @@
-# Mira 网页管理后台（0.8.8）
+# Mira 网页管理后台（0.8.9）
 
 0.8.8 的账号页新增 **GPT 默认推理档** 和 **最近 GPT 请求**。默认 high 仅在客户端没有指定推理档时使用，可改成“不干预”；更高档可能增加耗时与 Token。诊断卡显示实际发送的档位、来源、上游报告的模型/档位、输出上限和推理 Token，便于确认是否走错 Messages 协议或客户端仍设置 low。详情见 [CODEX.md](CODEX.md)。
+
+**0.8.9 新增功能**：账号页已恢复 **邮箱验证码登录** 并增加 **导入 JSON 凭证**。选择邮箱后输入邮箱，点击发送验证码，再输入邮件中的验证码；或者选择凭证 JSON 文件，填写新的 profile、sub2 账号名和分组后点击导入。支持 Mirasim portable JSON 和旧版 auth/device JSON（文件不超过 512 KB，必要凭证字段不超过 70,000 字符）。浏览器只发送必要凭证字段；服务器先验证 `/auth/me` 再保存，不信任文件中的会员、管理地址和其他配置。导入完成后可托管到当前 bridge；不覆盖主账号配置、不调用退出接口。凭证内容不会进入 GitHub、日志或 API 返回值。
+
+未收到验证码或本次登录失败，可点击“取消并重新开始”，再次发送仍需遵守 60 秒间隔。验证或保存已经在进行时，应等待结果；验证码提交后清空输入。导入请求响应丢失时保留当前表单再次点导入，会复用请求标识；若服务已重启，先查看 profiles 列表，已保存账号可以直接托管。
+
+过期的导入凭证会校验失败，请重新导出有效文件；导入检查不会自动刷新共享凭证。复制同一账号的 JSON 不会创建独立额度或全新的登录会话，多端同时使用同一刷新令牌可能相互影响，需要独立登录时选择 OAuth 或邮箱验证码。
 
 > 0.8.7：检测结果在对应区域自动更新，无需刷新整个页面。普通页面约 15 秒查询状态；正在运行的账号检测、窗口任务、升级约 2 秒跟踪一次，模型目录约 30 秒更新。轮询只读取状态，不会反复发送 `hi` 或模型测试。未保存的表单输入会保留；切到浏览器后台暂停轮询，回来后立即同步。
 
@@ -29,13 +35,13 @@ bridge 的 8787 端口另有单账号 `/panel` 页面，但它不能创建容器
 panel_tmp="$(mktemp -d)"
 cd "$panel_tmp"
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.8/mirasim-bridge-0.8.8-source.zip \
-  -o mirasim-bridge-0.8.8-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.9/mirasim-bridge-0.8.9-source.zip \
+  -o mirasim-bridge-0.8.9-source.zip &&
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.8/mirasim-bridge-0.8.8-source.zip.sha256 \
-  -o mirasim-bridge-0.8.8-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.8-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.8-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.9/mirasim-bridge-0.8.9-source.zip.sha256 \
+  -o mirasim-bridge-0.8.9-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.8.9-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.8.9-source.zip &&
 sudo python3 mirasim-bridge/scripts/install-panel.py --origin https://mira-admin.example.com
 ```
 
@@ -120,7 +126,7 @@ server {
 
 新 profile 容器共享原数据卷中的独立目录，**不是容器级凭证安全隔离**。不同 Mira 登录各有独立凭证，登录相同 Mira 账号并不会增加额度。本项目不调用原账号 logout/revoke；上游自己的会话政策仍由 Mirasim 决定。
 
-邮箱登录来自桌面客户端的独立流程：`POST /auth/code {email}` → `POST /auth/verify {email,code}`，与 OAuth provider 列表无关。没有真实邮件验证码时不会进行账号登录或生成凭证；测试使用模拟服务。
+邮箱登录来自桌面客户端的独立流程：`POST /auth/code {email}` → `POST /auth/verify {email,code}`，与 OAuth provider 列表无关。验证码最多校验 5 次，重新发送受 60 秒间隔限制；输入框隐藏验证码、提交后清空，不写日志或持久存储。2026-09-27 真实发送接口返回 HTTP 200；完整登录用模拟邮箱服务验证，真实邮件的收取与校验尚未完成实测。
 
 ## 5. 额度、模型与账号启停
 

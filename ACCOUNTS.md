@@ -6,7 +6,7 @@
 
 网页操作：
 
-1. “账号管理 → 新增账号”，填 profile、sub2 账号名、分组 ID，保持“托管到当前 bridge”勾选，用邮箱验证码或 Google 授权完成登录。
+1. “账号管理 → 新增账号”，填 profile、sub2 账号名、分组 ID，保持“托管到当前 bridge”勾选，用邮箱验证码、Google/GitHub 授权完成登录，或选择已有凭证 JSON 导入。
 2. 页面会自动托管并注册到 sub2，几秒后在概览的“全部 Mira 账号”里显示为“已入池”（首次可能等 1-2 轮健康检查）。
 3. 顶部“当前账号”选择器或点击一览中的行，可以切换查看/设置某个账号；“暂停调度”会把它立即摘出池子直到手动恢复。
 4. 已经用命令行登录、只保存了凭证的 profile，在 profiles 列表点“托管到当前 bridge”即可。
@@ -19,7 +19,27 @@
 
 0.7.0 支持用 Google 或邮箱验证码登录第二个 Mirasim 账号。每个 profile 单独保存凭证、设备密钥、bridge_secret、sub2api 账号名，并运行一个 bridge 进程。代码不会调用原账号的退出接口，也不会覆盖原账号或桌面的 setting.json；上游自己的会话政策仍由 Mirasim 决定。
 
-网页后台中的“邮箱验证码”使用客户端实际使用的 `POST /auth/code` → `POST /auth/verify` 流程；它不是 OAuth 回调。输入邮箱后收验证码，再输入验证码完成新 profile 保存。
+网页后台中的“邮箱验证码”使用客户端实际使用的 `POST /auth/code` → `POST /auth/verify` 流程；它不是 OAuth 回调。输入邮箱后收验证码，再输入验证码完成新 profile 保存。每次验证码最多尝试 5 次，发送之间至少间隔 60 秒。
+
+## 导入已有 JSON 凭证（0.8.9）
+
+网页“账号管理 → 新增账号”也可以选择 **导入已有凭证 JSON**。支持以下两种结构：
+
+```json
+{
+  "type": "mirasim",
+  "access_token": "…",
+  "refresh_token": "…",
+  "device_private_key": "-----BEGIN PRIVATE KEY----- …",
+  "expired": "2030-01-01T00:00:00.000Z"
+}
+```
+
+以及旧版桌面导出结构中的 `auth.token`、`auth.refreshToken`、`device.privateKey`。选择文件后填写新的 profile、sub2 账号名和分组，再点击导入。服务器会用导入的 access token 请求 `/auth/me` 验证，成功后在新 profile 中生成独立配置和 bridge 密钥；主账号不会登出、修改或覆盖。导入器只保存上述必要字段，JSON 中的邮箱、套餐、`admin_url`、管理密钥和其他元数据会被丢弃。加密 `mrs1:` 文件不能直接导入，需先在原登录设备导出 portable credential。
+
+文件限 512 KB，必须含有效的刷新令牌和 Ed25519 设备私钥；不导入文件中的 relay/admin 地址。验证失败不会保存新 profile，也不会自动刷新令牌。导入保存的是同一份会话凭证，不会增加账号额度；多端共用同一刷新令牌可能发生续期冲突，独立账号会话请重新授权或使用邮箱验证码。
+
+响应丢失可保持表单不变再次点导入；同一次请求只保存一次。已保存但托管失败时，在 profiles 列表重试托管。取消“托管到当前 bridge”后需按原流程启动独立容器，页面不会把尚未启动的 profile 当作正在运行的账号。
 
 ## 1. 升级原 bridge
 

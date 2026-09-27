@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
           '/panel/icon.png': ('icon.png', 'image/png')}
-OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status',
-              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs', 'usage', 'usage/pricing'}
+OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status', 'login/cancel',
+              'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs', 'usage', 'usage/pricing', 'account/import'}
 READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'usage'}
 
 
@@ -220,9 +220,9 @@ class Console:
                     self.agent.compose(target, 'stop', 'bridge', timeout=210)
                 result = {'completed': True}
             else:
-                if op in ('login/start', 'login/complete', 'login/status', 'profiles') and name != 'main':
+                if op in ('login/start', 'login/complete', 'login/status', 'login/cancel', 'account/import', 'profiles') and name != 'main':
                     raise ValueError('Add profiles through the main account')
-                if op == 'login/start':
+                if op in ('login/start', 'account/import'):
                     data = self.login_options(data)
                 result = self.bridge(self.target(name), op, data)
             if not readonly or op in {'account/access', 'account/check'}:

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const b = require('../mirasim-bridge');
 const { createPanel, ensurePanelKey } = require('../lib/panel');
 const { startEmailLogin } = require('../lib/login');
@@ -71,6 +72,65 @@ test('email profile flow keeps original credentials and config intact; wrong cod
   assert.equal(cred.access_token, 'second-access');
   assert.ok(!seen.some((s) => /oauth|logout|revoke/.test(s)));
   assert.deepEqual(await panel.call('login/complete', { id: begun.id }), result);
+});
+test('credential JSON import validates the authenticated identity, strips metadata and preserves the main account', async (t) => {
+  const { cfg, ctx, dir } = fixture(t); const before = fs.readFileSync(cfg._config_path);
+  const upstream = http.createServer(async (req, res) => {
+    req.resume();
+    if (req.url === '/auth/me') return res.end('{}');
+    res.writeHead(404); res.end();
+  });
+  cfg.relay.auth_url = await listen(upstream); t.after(() => close(upstream));
+  const panel = createPanel(cfg, ctx); t.after(() => panel.close());
+  const key = crypto.generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' });
+  const raw = { type: 'mirasim', access_token: 'import-access', refresh_token: 'import-refresh', device_private_key: key,
+    expired: new Date(Date.now() + 3600000).toISOString(), email: 'private@example.com', plan: 'private-plan', admin_url: 'https://private-admin', admin_api_key: 'must-not-copy' };
+  const result = await panel.call('account/import', { profile: 'imported', account_name: 'imported-account', hosted: false, port: 8788, public_base_url: 'http://mirasim-imported:8788', group_id: 15, credential: raw });
+  assert.deepEqual(result, { profile: 'imported', saved: true, hosted: false, account_name: 'imported-account' });
+  assert.deepEqual(fs.readFileSync(cfg._config_path), before);
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'profiles/imported/setting.json')));
+  assert.deepEqual(Object.keys(saved).sort(), ['access_token', 'device_private_key', 'expired', 'refresh_token', 'storage_version', 'type']);
+  assert.equal(saved.access_token, 'import-access'); assert.equal(saved.admin_api_key, undefined); assert.equal(saved.email, undefined);
+  await assert.rejects(panel.call('account/import', { profile: 'imported-again', account_name: 'x', hosted: false, port: 8789, public_base_url: 'http://mirasim-imported-again:8789', group_id: 15, credential: { ...raw, device_private_key: 'not-a-key' } }), /私钥|凭证/);
+});
+test('import retries are idempotent, concurrent requests coalesce and cancelled OTP permits a fresh login', async t => {
+  const { cfg, ctx, dir } = fixture(t); let checks=0, release;
+  const gate=new Promise(r=>{release=r;});
+  const panel=createPanel(cfg,ctx,{verifyLogin:async()=>{checks++;await gate;}});t.after(()=>panel.close());
+  const credential=require('../lib/login').createCredential({access:'test-import',refresh:'test-refresh'});
+  const data={request_id:crypto.randomUUID(),profile:'retry',hosted:true,group_id:15,credential};
+  const one=panel.call('account/import',structuredClone(data)),two=panel.call('account/import',structuredClone(data));
+  release();const first=await one;assert.deepEqual(await two,first);assert.equal(checks,1);
+  assert.deepEqual(await panel.call('account/import',structuredClone(data)),first);assert.equal(checks,1);
+  await assert.rejects(panel.call('account/import',{...data,account_name:'changed'}),/参数已改变/);
+  await assert.rejects(panel.call('account/import',{...data,request_id:crypto.randomUUID()}),/已存在/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'profiles/retry/setting.json'))).access_token,'test-import');
+});
+test('import failure never leaves a profile, bad shapes and encrypted credentials give safe errors', async t => {
+  const {cfg,ctx,dir}=fixture(t);const {importCredential,createCredential}=require('../lib/login');
+  const raw=createCredential({access:'test-access',refresh:'test-refresh'});
+  assert.equal(importCredential({auth:{token:raw.access_token,refreshToken:raw.refresh_token,exp:2000000000},device:{privateKey:raw.device_private_key}}).type,'mirasim');
+  for(const bad of [[],{...raw,refresh_token:''},{...raw,type:'openai'},{...raw,device_private_key:'mrs1:PRIVATE'}, {auth:{exp:'PRIVATE'},device:{}}])assert.throws(()=>importCredential(bad),err=>!err.message.includes('PRIVATE'));
+  const panel=createPanel(cfg,ctx,{verifyLogin:async()=>{throw Error('PRIVATE_BEARER');}});t.after(()=>panel.close());
+  await assert.rejects(panel.call('account/import',{profile:'failed',hosted:true,credential:raw}),err=>/凭证校验/.test(err.message)&&!err.message.includes('PRIVATE'));
+  assert.equal(fs.existsSync(path.join(dir,'profiles/failed')),false);
+});
+test('email flow validates renewable credentials, reaches a terminal state on fifth failure and cancels cleanly', async t => {
+  let attempts=0,mode='wrong';
+  const server=http.createServer((req,res)=>{req.resume();if(req.url==='/auth/code')return res.end('{}');attempts++;
+    if(mode==='missing')return res.end('{"access_token":"test-only"}');res.writeHead(mode==='busy'?429:400);res.end('{"secret":"PRIVATE"}');});
+  const origin=await listen(server);t.after(()=>close(server));
+  const cap=await startEmailLogin({authUrl:origin,email:' user@example.com '});t.after(()=>cap.close());assert.equal(cap.email,'user@example.com');
+  for(let i=0;i<5;i++)await assert.rejects(cap.submit('123456'),/验证码错误/);
+  await assert.rejects(cap.result,/尝试过多/);await assert.rejects(cap.submit('123456'),/已结束/);assert.equal(attempts,5);
+  mode='missing';const missing=await startEmailLogin({authUrl:origin,email:'x@example.com'});t.after(()=>missing.close());
+  await assert.rejects(missing.submit('123456'),/可续期/);await assert.rejects(missing.result,/可续期/);
+  mode='busy';const busy=await startEmailLogin({authUrl:origin,email:'x@example.com'});t.after(()=>busy.close());
+  await assert.rejects(busy.submit('123456'),/频繁/);
+  const {cfg,ctx}=fixture(t);cfg.relay.auth_url=origin;const panel=createPanel(cfg,ctx);t.after(()=>panel.close());
+  const begun=await panel.call('login/start',{profile:'cancelled',hosted:true,provider:'email',email:'x@example.com'});
+  assert.equal((await panel.call('login/cancel',{id:begun.id})).cancelled,true);
+  await assert.rejects(panel.call('login/complete',{id:begun.id,code:'123456'}),/过期/);
 });
 test('OTP concurrent submits and cancellation never create a second successful login', async (t) => {
   let release, calls = 0;

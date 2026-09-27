@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.8.9 — 2026-09-27
+- 网页新增可用的邮箱验证码登录：发送 `/auth/code` 后输入验证码，最多重试 5 次；邮箱选项不再被禁用。上游发送验证码接口实测 HTTP 200，完整验证码校验仍需要用户收到的邮箱验证码。
+- 新增“导入 JSON 凭证”：支持 Mirasim portable `access_token` / `refresh_token` / `device_private_key` 格式，也支持旧版 `auth.token` / `auth.refreshToken` / `device.privateKey` 格式。导入前通过 `/auth/me` 验证，保存时只保留必要凭证和过期时间，丢弃邮箱、套餐、admin_url、管理密钥等元数据。
+- 导入使用独立 profile，不覆盖主账号；可直接托管到当前 bridge，随后按账号密钥注册 sub2。原始文件只在浏览器内存中读取，不上传到项目或 GitHub。
+- 导入先在浏览器按字段过滤，再发送服务器；同一次请求支持响应丢失后重试，不重复保存。独立容器导入沿用宿主机网络配置，取消/过期/尝试耗尽的邮箱登录可重新发起。
+- 真实验证：邮箱发送接口返回 200；portable JSON 经真实 `/auth/me` 校验并在临时目录导入成功，随后清理临时文件。真实邮箱验证码校验尚未完成实测；Chrome 使用模拟邮箱服务跑通错误重试、保存和托管。186 项 Node 回归、58 项 Python 测试及 67 项自测通过。
+
 ## 0.8.8 — 2026-09-27
 - 修复 GPT Responses 参数丢失：保留 max_output_tokens、context_management、显式 store:true、previous_response_id、推理/工具/压缩历史；max_completion_tokens 转为输出预算，冲突时明确拒绝。保留已验证必要的 SSE 和字符串输入转换，truncation:auto 明确拒绝而不再静默忽略。
 - 新增每账号 gpt_default_effort（默认 high），只在客户端及历史未指定推理档时补齐；网页可改为不干预或其他档位。显式 low/none/xhigh/max 等不被默认值覆盖，compact 不追加档位。high 可能增加耗时和 Token；连接性短测试显式使用 low。

@@ -28,7 +28,7 @@ const { summarizeMembership } = require('./lib/membership');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.8.8';
+const VERSION = '0.8.9';
 const IS_WIN = process.platform === 'win32';
 
 /**

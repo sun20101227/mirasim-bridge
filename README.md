@@ -1,6 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.8**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.9**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**0.8.9**：恢复邮箱验证码入口，新增 portable/auth-device JSON 凭证导入、取消登录和导入重试保护。在“账号管理 → 新增账号”选择邮箱登录，或选择 JSON 文件后导入。导入前校验身份，仅保存必要凭证，可自动托管到当前 bridge；同名 profile 不覆盖。操作和验证范围见 [网页后台说明](PANEL.md) · [账号导入说明](ACCOUNTS.md)。
 
 **0.8.8**：修复 GPT 输出预算、上下文压缩和存储设置被删除/覆盖的问题，补全非流式推理与工具历史，移除 GPT 报错后错误注入 Claude 身份的重试。新增可调整的 GPT 默认推理档（high，仅补客户端未指定的档位，可能增加耗时与 Token）和“最近 GPT 请求”诊断卡；修复晚到的模型替换检测。已通过实际 gpt-6-astra Responses 多轮/工具测试，详见 [GPT 接入与排查](CODEX.md) · [验证记录](VERIFY.md)。
 
@@ -14,7 +16,7 @@
 
 **无需 SSH，在对话或 GitHub 里触发升级：**见 [REMOTE-CONTROL.md](REMOTE-CONTROL.md)。服务器主动读取升级指令，无需公网管理端口。已安装的旧版部署工具需要通过云厂商网页终端/服务器面板更新一次；这里不能凭空接入一个没有远程控制通道的服务器。
 
-专用管理后台：将宿主机 **8790** 反代为 HTTPS 域名，打开 `/panel` 可查看全部账号的调度状态与真实 Mirasim 额度、按账号暂停/恢复、模型启停/测试，使用 Google/GitHub 授权添加账号（默认托管到当前 bridge；邮箱验证码暂不可用），并一键升级/回退（含宿主机后台）。先通过网页终端安装一次后台，操作见 [PANEL.md](PANEL.md)。8787 的单 bridge 页面仅提供部分功能。
+专用管理后台：将宿主机 **8790** 反代为 HTTPS 域名，打开 `/panel` 可查看全部账号的调度状态与真实 Mirasim 额度、按账号暂停/恢复、模型启停/测试，使用 Google/GitHub 授权、邮箱验证码或 JSON 凭证导入添加账号（默认托管到当前 bridge），并一键升级/回退（含宿主机后台）。先通过网页终端安装一次后台，操作见 [PANEL.md](PANEL.md)。8787 的单 bridge 页面仅提供部分功能。
 
 **以后不想手动上传 ZIP：**见 [NETWORK-DEPLOY.md](NETWORK-DEPLOY.md)。一次性安装宿主机部署工具后，可用带独立密钥的 HTTP 接口拉取固定发布源并更新镜像，失败尝试回退。源码与发布入口：[GitHub](https://github.com/sun20101227/mirasim-bridge) · [最新版本](https://github.com/sun20101227/mirasim-bridge/releases/latest)。服务器仍需按说明接入一次。
 
@@ -25,6 +27,8 @@
 **保持原版、使用配套容器请读 [DOCKER.md](DOCKER.md)**；原生 systemd 部署见 [DEPLOY.md](DEPLOY.md)。变更记录见 [CHANGELOG.md](CHANGELOG.md)。[DESIGN.md](DESIGN.md) 保留历史实验，运行方式与默认参数以本 README、示例配置和当前代码为准。
 
 ## 验证范围
+
+0.8.9：186 项 Node 回归、58 项 Python 测试、67 项自测通过。真实邮箱发送接口返回 200；实际 portable JSON 经 `/auth/me` 校验、临时导入通过。Chrome 使用模拟邮箱服务验证错误重试、保存及托管，并验证 JSON 导入响应丢失后的重试。真实邮箱验证码校验尚未完成实测；发布不等于生产服务器已升级。
 
 0.8.8：178 项 Node 回归、57 项 Python 测试、67 项自测通过。真实 gpt-6-astra 经 bridge 验证约束计算、中文多轮历史与工具调用续答；直连与 bridge 的历史题答案及模型/档位字段一致。浏览器验证 GPT 档位保存与自动刷新保留输入。未验证生产服务器的 sub2 路由；模型字段和短题不能证明完整智力等效。
 
