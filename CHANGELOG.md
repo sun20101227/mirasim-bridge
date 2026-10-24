@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.9.2 — 2026-10-24（local_only）
+- 新增 `local_only` 单账号自用形态（默认关闭，升级不改变现有行为）：`single_concurrency` 把同一账号的在途推理请求压到 1 个；`idle_probe` 让健康循环在空闲期不再每 tick 发一次 `GET /v1/models`，只在超过 `idle_liveness_sec` 没有任何上游交互时探一次；额度/会员后台轮询下限拉长到 `quota_min_interval_sec` / `membership_min_interval_sec`。
+- 静默不会掩盖故障：只有「上一次已知健康」时才跳过探测；不健康、或健康状态未知时照常探测。真实请求成功或失败都会重置静默计时；`/__status` 与账号摘要新增 `local_only` / `effective_concurrency`，页面不会再显示 3 而实际只放 1 个。
+- 边界：只改本地并发、轮询和合成请求，**不改**签名、设备标识、`client_version` 或请求节奏，也不把流量伪装成官方客户端。目标是让上游看到本机真实形态，不是让它检测不出来。
+- 验证：`tests/local-only.test.js` 11 项（配置校验、开关语义、并发闸门实际生效、空闲静默、不健康时继续探测、关闭时行为不变、状态如实报告、注册并发取小值、保存后同步 sub2api、同步失败不阻断保存）。
+- **修复「登录状态」卡片显示「无法读取登录状态 · Unknown operation」**：宿主机 `panel-host.py` 与容器内 `panel-bridge.js` 的操作白名单都漏了 `reauth`，浏览器调用被直接拒掉。两处补上，并按只读操作处理（不抢升级/OAuth 的互斥锁）。同时删掉 `web/app.js` 里重复渲染的「需要重新登录」标签。
+- 新增门禁 `test_every_console_operation_survives_the_host_and_container_allowlists`：从 `web/app.js` 的实际调用与 `lib/panel.js` 的操作名求出交集，校验两层白名单都不缺项。`profile/info` 是宿主机内部调用（`Console.attach` 直连 bridge），刻意不进对外白名单，测试里写明了这一点。
+- **修复注册到 sub2api 的并发与本地闸门不一致**：`local_only` 把闸门压到 1，注册时却仍声明 `sub2api.concurrency`（默认 2）。sub2api 会按声明值真的并发发请求，第二个请求必然吃 503，还会被它记成上游不稳定。新增 `upstreamConcurrency()`：取闸门值与 `sub2api.concurrency` 的较小者，注册与更新账号时都用它。
+- **后台改并发后同步到 sub2api 账号**：`settings` 保存成功后把同一数值 `PUT` 到 sub2api 账号；同步失败只提示、不判定保存失败（本地闸门已生效）。页面会明确显示「sub2api 并发已同步为 N」或未能同步的原因。
+- 新增门禁 `tests/no-duplicate-definitions.test.js`：拒绝同一文件里重复的顶层声明，以及同一对象字面量里重复的键（后者运行时静默取最后一个值）。开发中反复出现整段编辑被应用两次的情况，这道门禁把它们变成测试失败而不是线上行为异常。
+
 ## 0.9.1 — 2026-10-24
 - **修复升级在「记录原容器」阶段失败**（`snapshot` / `镜像不存在`）：服务器上 `mirasim-bridge:local` 这个回退标签被清理过，而运行中的容器本身正常。代理现在会用运行中容器的镜像 ID 把这个标签补回去——`docker tag` 只增加别名，不替换、不重启任何容器——然后照常继续升级。部署仍保持「准备阶段绝不改动运行容器」的约束。
 - 多个账号运行在不同镜像上时不自动猜测回退点，明确返回 `rollback_tag_ambiguous` 并在页面说明原因；猜测会让其他账号失去回退能力。

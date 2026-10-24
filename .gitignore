@@ -32,3 +32,9 @@ timeline.jsonl
 
 # 一次性调研探针（可删）
 exp-*.js
+
+# Claude Code 本地技能配置（与项目无关，不进公开仓库）
+.claude/
+
+# Claude Code 本地技能配置（与项目无关，不进公开仓库）
+.claude/

@@ -29,7 +29,7 @@ const { summarizeRoster, rosterIds, modelInfo } = require('./lib/roster');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.9.1';
+const VERSION = '0.9.2';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -82,6 +82,24 @@ const DEFAULT_CONFIG = {
   window_keeper: { ...windowKeeper.DEFAULTS, windows: ['5h', '7d'] },
   diagnostics: { timeout_sec: 30, max_tokens: 128 },
   health: { interval_sec: 30, fail_threshold: 2, success_threshold: 2, min_dwell_sec: 60 },
+  // 单账号自用形态（local_only）。目标不是让上游认不出桥接器，而是让它看到的事实
+  // 本来就是「一台机器、一个设备、一个账号、一次只跑一个请求」，而不是多人共用的池。
+  // 全部是本地行为开关：它只减少并发、后台轮询和空闲期的合成请求，不改签名、不改设备
+  // 标识、不改请求节奏伪装成官方客户端——那些属于绕过访问控制，这个项目不做。
+  local_only: {
+    enabled: false,
+    // 强制单并发：同一时刻只允许一个推理请求在途。真正的瓶颈是上游眼里「同时有几个
+    // 请求来自这个账号」，多账号托管时每个账号各自计数，靠这里统一收紧。
+    single_concurrency: true,
+    // 空闲期的静默：健康循环不再每 tick 发一次 GET /v1/models 探测。只有超过
+    // idle_liveness_sec 没有任何真实流量时才探一次，用来发现凭证失效；有真实请求
+    // 成功时本来就会跳过一次探测。
+    idle_probe: true,
+    idle_liveness_sec: 1800,
+    // 额度/会员的后台轮询在 local_only 下默认拉长：它们对上游也是合成请求。
+    quota_min_interval_sec: 900,
+    membership_min_interval_sec: 1800,
+  },
   forward: {
     replay_buffer_mb: 64,
     // 保守起步：单会话代理的并发能力未测，且高并发最容易触发上游的滥用阈值。
@@ -242,6 +260,16 @@ function loadConfig(args) {
   return cfg;
 }
 
+function validateLocalOnly(lo) {
+  if (!isPlainObject(lo)) throw new Error('local_only 必须是对象');
+  for (const key of ['enabled', 'single_concurrency', 'idle_probe']) {
+    if (typeof lo[key] !== 'boolean') throw new Error(`local_only.${key} 必须是布尔值`);
+  }
+  for (const key of ['idle_liveness_sec', 'quota_min_interval_sec', 'membership_min_interval_sec']) {
+    if (!Number.isInteger(lo[key]) || lo[key] < 60) throw new Error(`local_only.${key} 必须是至少 60 的整数秒`);
+  }
+}
+
 function validateConfig(cfg) {
   if (!['session', 'relay'].includes(cfg.backend)) throw new Error('backend 必须是 session 或 relay');
   for (const key of Object.keys(DEFAULT_CONFIG)) {
@@ -305,6 +333,7 @@ function validateConfig(cfg) {
   if (!['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(cfg.constraints.adaptive_default_effort)) throw new Error('adaptive_default_effort 必须为空/low/medium/high/xhigh/max/ultra');
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
   if (typeof cfg.membership.enabled !== 'boolean' || !Number.isInteger(cfg.membership.interval_sec) || cfg.membership.interval_sec < 60) throw new Error('membership 需要布尔开关和至少 60 秒的查询间隔');
+  validateLocalOnly(cfg.local_only);
   windowKeeper.validateConfig(cfg.window_keeper);
   if (cfg.window_keeper.enabled && (cfg.backend !== 'relay' || !cfg.quota.enabled || !cfg.membership.enabled)) throw new Error('自动窗口需要 relay 后端及额度、会员查询');
   if (!Number.isInteger(cfg.diagnostics.timeout_sec) || cfg.diagnostics.timeout_sec < 1 || cfg.diagnostics.timeout_sec > 600 || !Number.isInteger(cfg.diagnostics.max_tokens) || cfg.diagnostics.max_tokens < 1 || cfg.diagnostics.max_tokens > 8192) throw new Error('diagnostics 超时/输出预算无效');
@@ -313,6 +342,39 @@ function validateConfig(cfg) {
   if (!Array.isArray(hosted) || hosted.some((n) => typeof n !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/.test(n) || n === 'main')
       || new Set(hosted).size !== hosted.length) throw new Error('accounts.hosted 必须是不重复的 profile 名数组（小写字母开头，不能是 main）');
   if (hosted.length && cfg.backend !== 'relay') throw new Error('accounts.hosted 需要 backend=relay');
+}
+
+/**
+ * local_only 生效后的并发上限。列表本身不隐藏，但同一账号同一时刻只放一个请求过去——
+ * 这是上游最容易看见的「反代/共用」特征，也是唯一一个能纯靠本地收窄就消掉的。
+ */
+function effectiveConcurrency(cfg, kind = 'default') {
+  const configured = kind === 'kimi' ? cfg.forward.kimi_max_concurrency : cfg.forward.max_concurrency;
+  if (cfg.local_only?.enabled && cfg.local_only.single_concurrency) return 1;
+  return Math.max(1, configured);
+}
+
+/** 额度/会员后台轮询在 local_only 下的下限：它们是合成请求，空闲期越少越好。 */
+function effectiveInterval(cfg, name) {
+  if (name === 'quota') {
+    return cfg.local_only?.enabled ? Math.max(cfg.quota.interval_sec, cfg.local_only.quota_min_interval_sec) : cfg.quota.interval_sec;
+  }
+  if (name === 'membership') {
+    return cfg.local_only?.enabled ? Math.max(cfg.membership.interval_sec, cfg.local_only.membership_min_interval_sec) : cfg.membership.interval_sec;
+  }
+  throw new Error('unknown interval ' + name);
+}
+
+/**
+ * 注册到 sub2api 时声明的并发。它必须跟闸门一致：sub2api 会按这个值真的并发发请求，
+ * 声明 2 而闸门放 1，第二个请求必然吃 503，还会让 sub2api 把上游记成不稳定。
+ * local_only 下上限是 1；否则取 sub2api.concurrency 与 forward.max_concurrency 的较小者
+ * （两者本来就是「同一件事的两个地方」，历史上默认都是 2，但配置可以改出一个不一致）。
+ */
+function upstreamConcurrency(cfg) {
+  const gate = effectiveConcurrency(cfg);
+  const declared = Math.max(1, Number(cfg.sub2api?.concurrency) || 1);
+  return Math.min(gate, declared);
 }
 
 const relayClients = new WeakMap();
@@ -1681,7 +1743,7 @@ async function syncAccountModels(cfg, id, { beforeWrite = async () => {}, accoun
 async function refreshQuota(cfg, ctx, { force = false } = {}) {
   if (cfg.backend !== 'relay' || !cfg.quota.enabled || ctx.shuttingDown) return;
   if (!force && Date.now() < (ctx.nextQuotaAt || 0)) return;
-  ctx.nextQuotaAt = Date.now() + cfg.quota.interval_sec * 1000;
+  ctx.nextQuotaAt = Date.now() + effectiveInterval(cfg, 'quota') * 1000;
   let snapshot;
   try {
     const res = await getRelay(cfg).request({ path: '/v1/limits', signal: AbortSignal.timeout(15000) });
@@ -1705,7 +1767,7 @@ async function refreshMembership(cfg, ctx, { force = false } = {}) {
   if (cfg.backend !== 'relay' || !cfg.membership.enabled || ctx.shuttingDown) return ctx.membership;
   if (ctx.membershipFlight) return ctx.membershipFlight;
   if (!force && Date.now() < (ctx.nextMembershipAt || 0)) return ctx.membership;
-  ctx.nextMembershipAt = Date.now() + cfg.membership.interval_sec * 1000;
+  ctx.nextMembershipAt = Date.now() + effectiveInterval(cfg, 'membership') * 1000;
   ctx.membershipFlight = (async () => {
     try { ctx.membership = summarizeMembership(await getRelay(cfg).profile({ signal: AbortSignal.timeout(15000) })); }
     catch { ctx.membership = { ...(ctx.membership || {}), available: Boolean(ctx.membership?.available), stale: true, error: '会员状态查询失败' }; }
@@ -1912,6 +1974,9 @@ function accountSummary(acct) {
     group_ids: cfg.sub2api.group_ids,
     max_concurrency: cfg.forward.max_concurrency,
     kimi_max_concurrency: cfg.forward.kimi_max_concurrency,
+    // What the gate actually enforces, so the console cannot claim 2 while local_only pins it to 1.
+    effective_concurrency: effectiveConcurrency(cfg),
+    local_only: Boolean(cfg.local_only?.enabled),
     model_fallback: cfg.constraints.model_fallback,
     disabled_models: cfg.constraints.disabled_models,
     relay: relay ? { ready: relay.ready, probe: relay.probe || null } : undefined,
@@ -2165,7 +2230,7 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
     const { cfg: acfg, ctx: actx } = acct;
 
     // --- 并发闸门 --- 读当前配置：网页后台可在运行中调整上限
-    const limit = Math.max(1, acfg.forward.max_concurrency);
+    const limit = effectiveConcurrency(acfg);
     agent.maxSockets = Math.max(agent.maxSockets, 4, limit * 2);
     if (actx.inflight >= limit) {
       actx.counters.rejected++;
@@ -2232,6 +2297,12 @@ function handleInternal(req, res, cfg, ctx) {
       last_fallback: ctx.lastFallback || null,
       model_fallback: cfg.constraints.model_fallback,
       disabled_models: cfg.constraints.disabled_models,
+      local_only: cfg.local_only?.enabled ? {
+        enabled: true,
+        concurrency: effectiveConcurrency(cfg),
+        idle_probe_skipped: ctx.counters.idle_probe_skipped || 0,
+        last_upstream_at: ctx.lastUpstreamAt ? new Date(ctx.lastUpstreamAt).toISOString() : null,
+      } : { enabled: false },
       sub2api: {
         managed: Boolean(ctx.sm),
         reachable: Boolean(ctx.reachable),
@@ -2486,7 +2557,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
 
   // --- 头部卫生（§7-4）---
   if (cleanBody && modelFamily(cleanBody.model) === 'kimi') {
-    if ((ctx.kimiInflight || 0) >= cfg.forward.kimi_max_concurrency) {
+    if ((ctx.kimiInflight || 0) >= effectiveConcurrency(cfg, 'kimi')) {
       ctx.counters.rejected++;
       return fail503(res, 'Kimi concurrency limit reached; other models remain available');
     }
@@ -2553,6 +2624,7 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     }
   }
   const status = upRes.statusCode;
+  ctx.lastUpstreamAt = Date.now();   // 任何上游交互都算活动：local_only 静默期由此重新计时
   if (status >= 200 && status < 300) {
     ctx.lastUpstreamOkAt = Date.now();   // 健康循环据此省掉紧随其后的合成探测
     if (ctx.keepalive && target.is_keepalive) ctx.keepalive.authFails = 0;
@@ -3532,11 +3604,25 @@ async function accountHealthTick(acct, { tickCount, withSub2api, args, recheckEv
     let forwardOk = false;
     // relay 后端：这个健康周期内刚有真实请求成功，就不再额外探测——少给 Mirasim 发合成请求
     const recentOk = cfg.backend === 'relay' && Date.now() - (ctx.lastUpstreamOkAt || 0) < cfg.health.interval_sec * 1000;
+    // local_only：空闲期完全静默。每 tick 一次的 GET /v1/models 是最容易被看见的合成流量，
+    // 所以只在「确实很久没有任何上游交互」时探一次，用来发现凭证失效；有真实请求时本来就不探。
+    // 静默不等于故障：沿用上一次真实探测的结论，不把安静当成掉线。
+    const lastActivity = Math.max(ctx.lastUpstreamOkAt || 0, ctx.lastUpstreamAt || 0, ctx.lastProbeAt || 0);
+    // 只有在上一次已知健康时才允许静默；不健康必须继续探测，否则永远发现不了恢复。
+    const quiet = Boolean(cfg.local_only?.enabled && cfg.local_only.idle_probe)
+      && ctx.lastKnownForwardOk === true
+      && lastActivity > 0
+      && Date.now() - lastActivity < cfg.local_only.idle_liveness_sec * 1000;
     if (recentOk) {
       forwardOk = true;
+    } else if (quiet) {
+      forwardOk = ctx.lastKnownForwardOk;
+      ctx.counters.idle_probe_skipped = (ctx.counters.idle_probe_skipped || 0) + 1;
     } else if (t) {
       const probe = await probeUpstream(t, '/v1/models', cfg);
+      ctx.lastProbeAt = Date.now();
       forwardOk = probe.status === 200 && probe.modelCount > 0;
+      ctx.lastKnownForwardOk = forwardOk;
       if (!forwardOk && probe.failure) {
         // Quota exhaustion is an account-level fact, not a dead credential: keep
         // the account registered and say why, instead of a bare "probe failed".
@@ -3612,7 +3698,7 @@ async function cmdServe(cfg, args) {
   validateConfig(cfg);
   const secret = cfg.bridge_secret || '';
   if (!secret.trim()) throw new Error('必须配置非空 bridge_secret（包括回环监听），防止经反代暴露无鉴权接口');
-  const maxConc = Math.max(1, cfg.forward.max_concurrency);
+  const maxConc = effectiveConcurrency(cfg);
 
   const ctx = newAccountCtx('main');
   const hub = new AccountHub(cfg, ctx);
@@ -3659,9 +3745,18 @@ async function cmdServe(cfg, args) {
   log(`桥接器监听 http://${host}:${port}`);
   log(`入站鉴权：已启用（x-api-key / Bearer），账号 ${hub.all().length} 个：${hub.all().map((a) => a.key).join('、')}`);
   log(`并发上限 ${maxConc}（保守起步，观察稳定后再调）`);
+  if (cfg.local_only?.enabled) {
+    log(`local_only 已启用：单并发 ${cfg.local_only.single_concurrency ? '是' : '否'}`
+      + `，空闲探测${cfg.local_only.idle_probe ? `间隔 ${cfg.local_only.idle_liveness_sec}s` : '关闭'}`
+      + `，额度轮询 ${effectiveInterval(cfg, 'quota')}s，会员轮询 ${effectiveInterval(cfg, 'membership')}s`);
+    log('local_only 只收窄本地并发与后台轮询，不改签名、设备标识或请求节奏——上游看到的是本机真实形态，不是伪装的官方客户端');
+  }
   if (cfg.backend === 'relay') {
     for (const acct of hub.all()) {
       const probe = await probeUpstream(resolveTarget(acct.cfg), '/v1/models', acct.cfg);
+      // 启动探测同时给 local_only 的静默期一个基线，避免刚起来就再探一次。
+      acct.ctx.lastProbeAt = Date.now();
+      acct.ctx.lastKnownForwardOk = probe.status === 200 && probe.modelCount > 0;
       log(`[${acct.key}] relay 初始探测 HTTP ${probe.status}，模型 ${probe.modelCount} 个`);
     }
   }
@@ -3772,7 +3867,7 @@ async function cmdRegister(cfg, args, account = mainAccount(cfg)) {
     log(`已存在账号 id=${id}，执行更新`);
     const patch = {
       credentials: { ...(existing.credentials || {}), api_key: cfg.bridge_secret || 'no-auth', base_url: baseUrl },
-      concurrency: cfg.sub2api.concurrency,
+      concurrency: upstreamConcurrency(cfg),
       priority: cfg.sub2api.priority,
     };
     if (groupIds.length && cfg.sub2api.manage_existing_groups) patch.group_ids = groupIds;
@@ -3786,7 +3881,7 @@ async function cmdRegister(cfg, args, account = mainAccount(cfg)) {
       type: 'apikey',
       credentials: { api_key: cfg.bridge_secret || 'no-auth', base_url: baseUrl },
       extra: {},
-      concurrency: cfg.sub2api.concurrency,
+      concurrency: upstreamConcurrency(cfg),
       priority: cfg.sub2api.priority,
       rate_multiplier: 1.0,
       group_ids: [], // 先在分组外创建，暂停后再加入目标分组，避免首次创建的可调度窗口。
@@ -4232,4 +4327,5 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
   getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest,
-  fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId };
+  fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId,
+  effectiveConcurrency, effectiveInterval, upstreamConcurrency, validateLocalOnly };

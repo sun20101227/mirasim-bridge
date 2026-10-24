@@ -150,6 +150,42 @@ class PanelHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Repair requires'):
             installer.prepare_recovery(self.agent)
 
+    def test_reauth_state_is_a_read_and_reaches_the_bridge(self):
+        # The login-status card is filled by this op. A host allowlist that omits it
+        # surfaces "Unknown operation" in the console instead of the account state.
+        calls = []
+        console = p.Console(self.agent, m.atomic_json, run_input=lambda argv, data: calls.append(data) or {'needs_reauth': False})
+        self.agent.lock.acquire()
+        try:
+            result = console.call({'operation': 'reauth', 'data': {'account': 'main'}})
+        finally:
+            self.agent.lock.release()
+        self.assertEqual(result, {'needs_reauth': False})
+        self.assertEqual(calls[0]['operation'], 'reauth', 'forwarded to the bridge, not answered on the host')
+        self.assertFalse(self.agent.lock.locked(), 'a read must never hold the mutation mutex')
+
+    def test_every_console_operation_survives_the_host_and_container_allowlists(self):
+        # Both allowlists are hand-maintained; when one falls behind, the console shows
+        # a generic "Unknown operation" for a feature that exists. The source of truth is
+        # what the browser actually calls, cross-checked against lib/panel.js so a
+        # renamed op cannot slip through unnoticed.
+        import re
+        root = Path(__file__).parents[1]
+        panel_ops = set(re.findall(r"operation === '([^']+)'", (root / 'lib/panel.js').read_text(encoding='utf-8')))
+        browser_ops = set(re.findall(r"api\('([a-z][a-z/-]*)'", (root / 'web/app.js').read_text(encoding='utf-8')))
+        self.assertTrue(panel_ops and browser_ops, 'sanity: operation names were parsed')
+        console_ops = browser_ops & panel_ops
+        self.assertIn('reauth', console_ops, 'sanity: the login-status card is a console feature')
+        # profile/info is host-internal (Console.attach calls self.bridge directly, never
+        # the browser-facing allowlist), so it is deliberately absent from OPERATIONS.
+        self.assertNotIn('profile/info', browser_ops)
+        missing_host = console_ops - p.OPERATIONS
+        self.assertEqual(missing_host, set(), 'panel-host.py OPERATIONS is missing ' + repr(sorted(missing_host)))
+        adapter = (root / 'scripts/panel-bridge.js').read_text(encoding='utf-8')
+        allowed = set(re.findall(r"'([a-z][a-z/-]*)'", adapter.split('].includes(data.operation)')[0].split('if (![')[1]))
+        missing_container = console_ops - allowed
+        self.assertEqual(missing_container, set(), 'panel-bridge.js allowlist is missing ' + repr(sorted(missing_container)))
+
     def test_background_read_does_not_block_oauth_completion_or_release_mutation_lock(self):
         reading, finish = threading.Event(), threading.Event()
         def bridge(args, data):

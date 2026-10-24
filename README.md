@@ -1,8 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.1**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.2**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
 
-**0.9.1**：修复服务器上 `mirasim-bridge:local` 回退标签被清理后，升级在「记录原容器」阶段报「镜像不存在」而中止的问题。代理现在用运行中容器的镜像 ID 补回该标签后继续，不替换也不重启容器。见 [变更记录](CHANGELOG.md)。
+**0.9.2**：新增 `local_only` 单账号自用形态（默认关闭）：把同一账号的在途请求压到 1、空闲期不再每 tick 探测上游、额度/会员后台轮询拉长。修复「登录状态」卡片报 `Unknown operation`（宿主机与容器两层操作白名单都漏了 `reauth`）；修复注册到 sub2api 的并发与本地闸门可能不一致。见 [变更记录](CHANGELOG.md) · [降低暴露面说明](LOCAL-ONLY.md)。
 
 **0.9.0 本地升级包**：控制台整体重写为设计令牌体系（对比度全部 ≥ 4.5:1、rem 字号、44px 触控、三态主题、深链路由、命令面板、无阻塞对话框），静态资源改用 ETag + 304 + gzip；协议侧放通 `/v1/chat/completions`、透传 `[1m]` 模型后缀、完整解析 roster `agents`，并新增**登录失效后可重新登录**（只替换凭证，不改账号配置，无需重启）。升级前请读 [0.9.0 说明](UPGRADE-0.9.0.md) —— 宿主机后台必须一起更新。
 
@@ -104,7 +104,7 @@ node mirasim-bridge.js serve
 | `sub2api.group_ids` | 已存在的 anthropic/composite 分组；本环境历史配置为 `[15]` |
 | `sub2api.account_name` | 默认 `mirasim-cloud`，按名字查找并更新 |
 | `sub2api.manage_existing_groups` | 默认 false，保留后台修改的既有账号分组；新账号仍使用 group_ids |
-| `sub2api.concurrency` / `forward.max_concurrency` | 均默认 2，建议同步修改 |
+| `sub2api.concurrency` / `forward.max_concurrency` | 均默认 2。注册到 sub2api 时用两者与 `local_only` 闸门的**较小值**（`upstreamConcurrency()`），所以调高其中一个不会让 sub2api 发出超过本地上限的请求；后台保存并发后也会把该值同步回 sub2api 账号 |
 | `forward.kimi_max_concurrency` | 默认 1，每个 worker 的 Kimi 并发上限 |
 | `constraints.disabled_models` | 默认排除当前实测无容量的三个 DeepSeek 型号；它们仍会在目录中显示，清空数组可重新启用 |
 | `constraints.kimi_default_effort` | 默认 low；保留调用方显式推理配置，空字符串关闭默认注入 |
@@ -117,6 +117,18 @@ node mirasim-bridge.js serve
 | `forward.log_failures` | 默认 false；开启后记录截断的错误载荷，可能含聊天内容 |
 | `forward.failure_log` | `requests.log`，约 5 MB 时轮转成 `.1`；相对服务工作目录 |
 | `health.interval_sec` | 30 秒；定期重新验证 sub2api 侧可达性 |
+| `local_only.enabled` | 默认 false。单账号自用形态：把本地并发、后台轮询和空闲探测收窄到「一台机器一个账号」的样子。见下方说明 |
+| `local_only.single_concurrency` | 默认 true；开启后同一账号同一时刻只放行一个推理请求，`/__status` 与账号摘要同时报告配置值和实际生效值 |
+| `local_only.idle_probe` / `idle_liveness_sec` | 默认 true / 1800 秒；空闲期不再每 tick 探测，只有超过该时长没有任何上游交互时才发一次存活探测。已知不健康时不静默 |
+| `local_only.quota_min_interval_sec` / `membership_min_interval_sec` | 默认 900 / 1800 秒；local_only 下额度与会员后台轮询的下限，已配置更长值不会被缩短 |
+
+**`local_only` 是什么、不是什么。** 它减少的是本地行为：并发数、后台轮询频率、空闲期的合成请求。上游因此看到的是这台机器真实的样子——一个账号、一个设备、一次一个请求。它**不**修改请求签名、设备标识、`client_version`、请求节奏，也不会把流量伪装成官方客户端；那属于规避上游的访问控制，本项目不提供。目标是把「看起来像多账号共用池」降回「看起来就是一个自用账号」，而不是让检测失效。
+| `local_only.enabled` | 默认 false。单账号自用形态：把本地并发、后台轮询和空闲探测收窄到「一台机器一个账号」的样子。见下方说明 |
+| `local_only.single_concurrency` | 默认 true；开启后同一账号同一时刻只放行一个推理请求，`/__status` 与账号摘要同时报告配置值和实际生效值 |
+| `local_only.idle_probe` / `idle_liveness_sec` | 默认 true / 1800 秒；空闲期不再每 tick 探测，只有超过该时长没有任何上游交互时才发一次存活探测。已知不健康时不静默 |
+| `local_only.quota_min_interval_sec` / `membership_min_interval_sec` | 默认 900 / 1800 秒；local_only 下额度与会员后台轮询的下限，已配置更长值不会被缩短 |
+
+**`local_only` 是什么、不是什么。** 它减少的是本地行为：并发数、后台轮询频率、空闲期的合成请求。上游因此看到的是这台机器真实的样子——一个账号、一个设备、一次一个请求。它**不**修改请求签名、设备标识、`client_version`、请求节奏，也不会把流量伪装成官方客户端；那属于规避上游的访问控制，本项目不提供。目标是把「看起来像多账号共用池」降回「看起来就是一个自用账号」，而不是让检测失效。
 | `shutdown.drain_timeout_sec` | 30 秒；先摘流量、等请求结束，再关闭保活 |
 | `shutdown.total_timeout_sec` | 150 秒，覆盖注册/暂停/排空的总时间；systemd 超时必须更长 |
 

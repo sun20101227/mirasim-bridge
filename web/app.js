@@ -273,6 +273,13 @@ function versionNewer(a, b) {
   return false;
 }
 const label = (row) => row.account === 'main' ? (row.target === 'main' ? 'main' : `${row.target}（容器）`) : `${row.target} › ${row.account}`;
+// sub2api is told its own concurrency when the account is registered; saving a new
+// value has to carry over or sub2api keeps sending more requests than the gate allows.
+function sub2SyncNote(sync) {
+  if (!sync) return '';
+  if (sync.applied) return `sub2api 并发已同步为 ${sync.concurrency}。`;
+  return `本地并发已生效，但 sub2api 账号并发未能同步（${sync.error || '未知原因'}），请稍后重新保存或在 sub2api 里手动改为 ${sync.concurrency}。`;
+}
 async function api(operation, data = {}, target = selected.target) {
   const response = await fetch(host ? '/panel/api' : '/__panel/' + operation, { method: 'POST',
     headers: { 'content-type': 'application/json', 'x-panel-key': key },
@@ -476,7 +483,6 @@ async function fleet() {
         const quota = failure?.kind === 'quota';
         state.append(pill(quota ? (failure.retry_after_sec ? `共享额度用尽 · ${Math.round(failure.retry_after_sec / 60)}分` : '共享额度用尽') : '上游未就绪', quota ? 'warn' : 'bad'));
       }
-      if (a.needs_reauth) state.append(pill('需要重新登录', 'bad'));
       if (a.needs_reauth) state.append(pill('需要重新登录', 'bad'));
       if (a.sub2api_codex?.managed) state.append(pill(`Codex ${SCHED[a.sub2api_codex.schedulable]?.[0] || '等待'}`, a.sub2api_codex.schedulable === 'on' ? 'info' : ''));
     }
@@ -1546,7 +1552,7 @@ $('settings-form').addEventListener('submit', guarded(async () => {
   const r = await api('settings', data, scope.target);
   if (!sameAccount(scope)) return;
   dirtyForms.delete('settings-form');
-  notice(`${label(scope)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · 请求体上限 ${r.replay_buffer_mb === undefined ? '（旧版 bridge 未支持）' : r.replay_buffer_mb + ' MB'} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
+  notice(`${label(scope)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · 请求体上限 ${r.replay_buffer_mb === undefined ? '（旧版 bridge 未支持）' : r.replay_buffer_mb + ' MB'} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。${sub2SyncNote(r.sub2api_concurrency)}已立即生效。`, r.sub2api_concurrency && r.sub2api_concurrency.applied === false); await overview();
 }));
 $('codex-form').addEventListener('submit', guarded(async () => {
   const scope = { ...selected };

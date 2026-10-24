@@ -35,6 +35,22 @@
   },
   "membership": { "enabled": true, "interval_sec": 900 },
   "window_keeper": { "enabled": false, "model": "", "windows": ["5h", "7d"], "max_per_day": 6, "state_id": "" },
+  "local_only": {
+    "enabled": false,
+    "single_concurrency": true,
+    "idle_probe": true,
+    "idle_liveness_sec": 1800,
+    "quota_min_interval_sec": 900,
+    "membership_min_interval_sec": 1800
+  },
+  "local_only": {
+    "enabled": false,
+    "single_concurrency": true,
+    "idle_probe": true,
+    "idle_liveness_sec": 1800,
+    "quota_min_interval_sec": 900,
+    "membership_min_interval_sec": 1800
+  },
   "health": {
     "interval_sec": 30,
     "fail_threshold": 2,
