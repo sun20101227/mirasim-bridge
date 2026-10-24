@@ -35,7 +35,9 @@ $sourceFiles = @(
     'lib/usage.js', 'tests/usage.test.js', 'USAGE.md', 'tests/gpt-fidelity.test.js',
     'tests/request-body.test.js', 'UPGRADE-0.8.10.md', 'UPGRADE-0.9.0.md',
     'lib/roster.js', 'tests/latest-mirasim.test.js', 'tests/quota-roster.test.js',
-    'tests/design-tokens.test.js', 'tests/a11y-static.test.js', 'tests/reauth.test.js', 'tests/mirasim-adapters.test.js'
+    'tests/design-tokens.test.js', 'tests/a11y-static.test.js', 'tests/reauth.test.js', 'tests/mirasim-adapters.test.js',
+    'tests/docker-context.test.js',
+    'tests/docker-context.test.js'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

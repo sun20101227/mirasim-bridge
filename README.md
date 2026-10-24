@@ -30,7 +30,7 @@
 
 ## 验证范围
 
-0.9.0 本地包：234 项 Node 回归、58 项 Python 测试、68 项自测通过。新增四类长期门禁：`design-tokens`（两套主题 × 8 文字令牌 × 8 背景的对比度、主题令牌对齐）、`a11y-static`（caption/scope、控件 label、跳转链接、禁止阻塞对话框、主题与 hash 路由）、`panel-assets`（每个注册资源真实存在以防打包漏文件、304、gzip）、`reauth`（永久拒绝与临时失败的区分、重新登录只换凭证）。对 `relay.mirasim.ai` 的实测确认：控制接口（`/v1/models`、`/v1/limits`、`/v1/model-roster`）不校验请求签名，`/v1/device/session` 校验；`/v1/chat/completions` 是真实路由（封装请求得 429，伪路径得 404 `not an endpoint on this router`）；未封装的裸签名会被判 `client_outdated`。**未验证**：`adaptive_effort` 的 `thinking.type=adaptive` 线格式与 `/v1/chat/completions` 的真实推理响应——账号共享额度用尽（`credit_exhausted_shared`，`retry-after: 3600`），所有推理请求在请求体校验前即返回 429；真实浏览器与屏幕阅读器的人工走查同样未进行。
+0.9.0 本地包：237 项 Node 回归、58 项 Python 测试、68 项自测通过。新增五类长期门禁：`design-tokens`（两套主题 × 8 文字令牌 × 8 背景的对比度、主题令牌对齐）、`a11y-static`（caption/scope、控件 label、跳转链接、禁止阻塞对话框、主题与 hash 路由）、`panel-assets`（每个注册资源真实存在以防打包漏文件、304、gzip）、`reauth`（永久拒绝与临时失败的区分、重新登录只换凭证）、`docker-context`（沿真实 require 图校验 `.dockerignore` 白名单，防止镜像缺模块）。对 `relay.mirasim.ai` 的实测确认：控制接口（`/v1/models`、`/v1/limits`、`/v1/model-roster`）不校验请求签名，`/v1/device/session` 校验；`/v1/chat/completions` 是真实路由（封装请求得 429，伪路径得 404 `not an endpoint on this router`）；未封装的裸签名会被判 `client_outdated`。**未验证**：`adaptive_effort` 的 `thinking.type=adaptive` 线格式与 `/v1/chat/completions` 的真实推理响应——账号共享额度用尽（`credit_exhausted_shared`，`retry-after: 3600`），所有推理请求在请求体校验前即返回 429；真实浏览器与屏幕阅读器的人工走查同样未进行。
 
 0.8.9：186 项 Node 回归、58 项 Python 测试、67 项自测通过。真实邮箱发送接口返回 200；实际 portable JSON 经 `/auth/me` 校验、临时导入通过。Chrome 使用模拟邮箱服务验证错误重试、保存及托管，并验证 JSON 导入响应丢失后的重试。真实邮箱验证码校验尚未完成实测；发布不等于生产服务器已升级。
 

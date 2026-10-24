@@ -15,6 +15,8 @@ lib/**
 !lib/sse.js
 !lib/usage.js
 !lib/panel.js
+!lib/roster.js
+!lib/roster.js
 !scripts/
 scripts/**
 !scripts/deployment.js

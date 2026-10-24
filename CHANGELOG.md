@@ -13,7 +13,8 @@
 - 模型页显示额度系数、上下文、最大输出、自动压缩、adaptive、上游单价，以及「已下架/未路由」计数与 roster 来源；支持排序与目录 JSON 导出。
 - **登录失效可重新登录**：刷新令牌被永久拒绝（4xx / `invalid_grant` 等）时标记 `reauth_required` 并跳过冷却；账号页新增「登录状态」卡片，可为该账号重新授权，**只替换凭证文件**，账号名/分组/并发不变，旧凭证留作 `setting.previous.json`，新凭证原子写入并热加载，无需重启。429/5xx 仍按临时失败退避。
 - 宿主部署工具（`deploy-agent.py`、`install-panel.py`）文件清单同步新增的三个 web 资源，避免升级后宿主机后台 404。
-- 验证：234 项 Node 回归、58 项 Python 测试、68 项自测通过。新增四类门禁长期生效：`design-tokens`（对比度/主题对齐）、`a11y-static`（结构/label/禁止阻塞对话框）、`panel-assets`（资源存在/304/gzip）、`reauth`（永久拒绝 vs 临时失败）。详见 [UPGRADE-0.9.0.md](UPGRADE-0.9.0.md)。
+- 修复 `.dockerignore` 漏掉 `lib/roster.js`：构建上下文是白名单，宿主机测试全绿但镜像缺少该模块，容器启动即 `Cannot find module`。新增 `tests/docker-context.test.js`，读取真实 require 图与 `index.html` 的资源引用，静态校验构建上下文完整性。
+- 验证：237 项 Node 回归、58 项 Python 测试、68 项自测通过。新增五类门禁长期生效：`design-tokens`（对比度/主题对齐）、`a11y-static`（结构/label/禁止阻塞对话框）、`panel-assets`（资源存在/304/gzip）、`reauth`（永久拒绝 vs 临时失败）、`docker-context`（构建上下文完整性）。详见 [UPGRADE-0.9.0.md](UPGRADE-0.9.0.md)。
 - 未验证：`adaptive_effort` 的线上线格式与 `/v1/chat/completions` 的真实推理响应——账号共享额度用尽，所有推理请求在请求体校验前即返回 429。真实浏览器与屏幕阅读器的人工走查也尚未进行。
 
 ## 0.8.10 — 2026-10-24（本地升级包，未发布）

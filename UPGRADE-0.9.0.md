@@ -47,7 +47,7 @@
 
 ## 验证
 
-`node --test tests/*.test.js` = 234 项；`selftest` = 68 项；Python = 58 项。
+`node --test tests/*.test.js` = 237 项；`selftest` = 68 项；Python = 58 项。
 
 新增的门禁会长期生效：
 
@@ -56,6 +56,7 @@
 - `tests/panel-assets.test.js`：每个注册资源都真实存在（防止打包漏文件）、304、gzip。
 - `tests/reauth.test.js`：永久拒绝 vs 临时失败的区分、重新登录只换凭证、失败时不动旧凭证。
 - `tests/mirasim-adapters.test.js`：chat/completions 放通、`[1m]` 透传、roster 合并、`adaptive_effort` 开关。
+- `tests/docker-context.test.js`：`.dockerignore` 是白名单，这个门禁沿真实 require 图检查每个模块都进了构建上下文。0.9.0 首次发布就是被它抓到的问题——宿主机测试全绿，镜像里却没有 `lib/roster.js`，容器启动直接 `Cannot find module`。
 
 ## 未验证
 
