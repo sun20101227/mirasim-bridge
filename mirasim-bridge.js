@@ -25,10 +25,11 @@ const { RelayClient, loadCredential, validateEndpoint, request: httpRequest } = 
 const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { summarizeMembership } = require('./lib/membership');
+const { summarizeRoster, rosterIds, modelInfo } = require('./lib/roster');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.8.9';
+const VERSION = '0.9.0';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -50,6 +51,11 @@ const DEFAULT_CONFIG = {
   backend: 'session',
   relay: {
     url: 'https://relay.mirasim.ai', auth_url: 'https://auth.mirasim.ai',
+    // Sent as x-mirasim-client and folded into the signature. Live probe 2026-10-24:
+    // /v1/device/session verifies the signature but not this value — 0.0.1 through
+    // 9.9.9 all mint a ticket, and the desktop 0.0.629 client's NUL-joined canonical
+    // is rejected (401) while this bridge's mrs-sig-v2 form is accepted. Keep claiming
+    // the version this implementation actually speaks instead of the newest app.
     setting_json: '', client_version: '0.0.354', collect: false, locale: '',
     seal_public_key: '',
   },
@@ -77,7 +83,7 @@ const DEFAULT_CONFIG = {
   diagnostics: { timeout_sec: 30, max_tokens: 128 },
   health: { interval_sec: 30, fail_threshold: 2, success_threshold: 2, min_dwell_sec: 60 },
   forward: {
-    replay_buffer_mb: 8,
+    replay_buffer_mb: 64,
     // 保守起步：单会话代理的并发能力未测，且高并发最容易触发上游的滥用阈值。
     // 观察稳定后再往上调，别一上来就放开。
     max_concurrency: 2,
@@ -113,6 +119,13 @@ const DEFAULT_CONFIG = {
     // relay 在额度不足时可能用别的模型顶替本轮，并在响应的 model 字段里报告实际模型。
     // observe：照常转发并计数；forbid：一旦被替换就中断本轮（返回 503，sub2api 会换号重试）。
     model_fallback: 'observe',
+    // 自适应思考（默认关）：roster 标 adaptive 的模型改发 effort 字符串而不是 token 预算。
+    // 打开后还需要 adaptive_default_effort 给出档位，否则什么都不合成。
+    // 注意：未在真实 relay 上验证——2026-10-24 该账号共享额度耗尽，所有推理请求在校验请求体
+    // 之前就回 429 credit_exhausted_shared。开关关闭时行为与之前完全一致。
+    adaptive_effort: false,
+    // 合成 thinking.type=adaptive 时使用的档位；空 = 不合成（不猜上游接受的档位）。
+    adaptive_default_effort: '',
   },
   keepalive: {
     enabled: true,
@@ -287,7 +300,9 @@ function validateConfig(cfg) {
   if (cfg.shutdown.total_timeout_sec <= cfg.shutdown.drain_timeout_sec) throw new Error('shutdown.total_timeout_sec 必须大于 drain_timeout_sec');
   if (!Array.isArray(cfg.constraints.disabled_models) || cfg.constraints.disabled_models.some((s) => typeof s !== 'string' || !s.trim())) throw new Error('disabled_models 必须是模型 ID 数组');
   if (!['', 'low', 'high', 'max'].includes(cfg.constraints.kimi_default_effort)) throw new Error('kimi_default_effort 必须为空/low/high/max');
-  if (!['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(cfg.constraints.gpt_default_effort)) throw new Error('gpt_default_effort 必须为空/low/medium/high/xhigh/max');
+  if (!['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(cfg.constraints.gpt_default_effort)) throw new Error('gpt_default_effort 必须为空/low/medium/high/xhigh/max/ultra');
+  if (typeof cfg.constraints.adaptive_effort !== 'boolean') throw new Error('constraints.adaptive_effort 必须是布尔值');
+  if (!['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(cfg.constraints.adaptive_default_effort)) throw new Error('adaptive_default_effort 必须为空/low/medium/high/xhigh/max/ultra');
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
   if (typeof cfg.membership.enabled !== 'boolean' || !Number.isInteger(cfg.membership.interval_sec) || cfg.membership.interval_sec < 60) throw new Error('membership 需要布尔开关和至少 60 秒的查询间隔');
   windowKeeper.validateConfig(cfg.window_keeper);
@@ -979,7 +994,7 @@ function needsCCIdentity(model, cfg) {
   if (pattern === undefined || pattern === null) return true;
   if (pattern === '') return false;
   const re = compileRe(pattern);
-  return re ? re.test(String(model || '')) : true;
+  return re ? re.test(bareModelId(model)) : true;
 }
 
 function injectCC(body) {
@@ -1012,10 +1027,10 @@ function compileRe(src) {
 }
 
 /** 实测除 claude-haiku-4-5 外全是推理模型，带任一采样参数即 400（temperature=1 除外） */
-const acceptsSampling = (model, cfg) => {
+function acceptsSampling(model, cfg) {
   const re = compileRe(cfg.constraints.sampling_models);
-  return re ? re.test(model ?? '') : false;
-};
+  return re ? re.test(bareModelId(model)) : false;
+}
 const hasSampling = (r) => r.temperature != null || r.top_p != null || r.top_k != null;
 
 /** 递归剥掉 cache_control.scope（Claude Code 2.1+ 的跨会话 cache 扩展），ttl 本身合法保留 */
@@ -1072,9 +1087,18 @@ function mergeConsecutiveAssistants(messages) {
  * 只有在 error 为 null 时才把 body 发出去——宁可本地回一个说人话的 400，
  * 也不让客户端收到那句什么都诊断不了的 "rejected as invalid"。
  */
-/** 模型系列：已知四家按名字识别，其余取第一个连字符前的前缀（glm-5.3-flash → glm），目录里出现新家族时不需要改代码 */
+/**
+ * 模型系列：已知四家按名字识别，其余取第一个连字符前的前缀（glm-5.3-flash → glm），目录里出现新家族时不需要改代码
+ *
+ * `[1m]`/`[1M]` 只是 Mirasim 客户端选择 context window 的写法（官方桌面端的 xQ() 也是先剥掉它
+ * 再比对裸 id），所以所有「校验 / 匹配」都看裸 id，只有真正发出去的 body 保留调用方的原字符串。
+ */
+function bareModelId(id) {
+  return String(id ?? '').replace(/\[1m\]$/i, '');
+}
+
 function modelFamily(id) {
-  const name = String(id || '').toLowerCase();
+  const name = bareModelId(id).toLowerCase();
   const known = /^(claude|gpt|deepseek|kimi)-/.exec(name);
   if (known) return known[1];
   const prefix = /^([a-z][a-z0-9]{0,15})[-_.]/.exec(name);
@@ -1083,10 +1107,11 @@ function modelFamily(id) {
 
 function isModelAllowed(id, cfg) {
   if (typeof id !== 'string' || !id) return false;
-  if (cfg.constraints.disabled_models?.includes(id)) return false;
+  const bare = bareModelId(id);
+  if (cfg.constraints.disabled_models?.some((m) => bareModelId(m) === bare)) return false;
   const allow = compileRe(cfg.constraints.model_filter);
   const block = compileRe(cfg.constraints.model_block);
-  return (!allow || allow.test(id)) && (!block || !block.test(id));
+  return (!allow || allow.test(bare)) && (!block || !block.test(bare));
 }
 
 function catalogRows(value) {
@@ -1133,20 +1158,17 @@ function replaceCatalogRows(value, rows) {
   return out;
 }
 
-function sanitizeMessagesRequest(body, cfg) {
+function sanitizeMessagesRequest(body, cfg, { roster = null } = {}) {
   const notes = [];
   if (typeof body.model !== 'string' || !body.model.trim()) return { body, notes, error: { message: 'model 必须是非空字符串' } };
 
-  // Mirasim 内部的 context 变体写法（claude-opus-5[1M]），上游 404。提前给明确错误。
-  if (/\[1M\]$/i.test(String(body.model))) {
-    return {
-      body, notes,
-      error: { message: `模型名不要带 [1M] 后缀（那是 Mirasim 内部写法）。用 GET /v1/models 返回的裸名字。`, type: 'invalid_request_error' },
-    };
-  }
+  // Mirasim 的 context 变体写法（claude-opus-5[1m]）：它只是官方客户端选择 context window
+  // 的标记，不是模型 id 的一部分（桌面端自己的 xQ() 也是剥掉再比对裸 id）。所有本地校验都用
+  // 裸 id，body.model 保留调用方原字符串，让上游看到客户端真正发的东西。
+  const bare = bareModelId(body.model);
 
   const blockRe = compileRe(cfg.constraints.model_block);
-  if (blockRe && blockRe.test(body.model)) {
+  if (blockRe && blockRe.test(bare)) {
     return {
       body, notes,
       error: {
@@ -1158,9 +1180,25 @@ function sanitizeMessagesRequest(body, cfg) {
   if (!isModelAllowed(body.model, cfg)) {
     return { body, notes, error: { message: `模型 ${body.model} 不在 model_filter 允许范围内`, code: 'model_filtered' } };
   }
-  if (modelFamily(body.model) === 'kimi' && cfg.constraints.kimi_default_effort && body.thinking == null && body.output_config == null) {
+  if (bare !== body.model) notes.push('model_1m_suffix');
+  if (modelFamily(bare) === 'kimi' && cfg.constraints.kimi_default_effort && body.thinking == null && body.output_config == null) {
     body.output_config = { effort: cfg.constraints.kimi_default_effort };
     notes.push('kimi_default_effort');
+  }
+
+  // 自适应思考（constraints.adaptive_effort，默认关，未在真实 relay 上验证）：
+  // 官方桌面端源码的注释说得很清楚——roster 里 adaptive 的模型必须发 effort 字符串
+  // （thinking.type=adaptive + output_config.effort），非 adaptive 的发 token 预算
+  // （thinking.type=enabled + budget_tokens），而且这个开关绝不按模型名猜，猜错每轮都 400。
+  // 只在开关打开、roster 明确标了 adaptive、档位已知、且调用方没自己带 thinking/output_config
+  // 时才合成；任何一条不满足就一个字节都不改。
+  const adaptiveRung = cfg.constraints.adaptive_default_effort || '';
+  if (cfg.constraints.adaptive_effort && adaptiveRung && roster
+      && modelInfo(roster, null, bare)?.adaptive === true
+      && body.thinking == null && body.output_config == null) {
+    body.thinking = { type: 'adaptive' };
+    body.output_config = { effort: adaptiveRung };
+    notes.push('adaptive_effort');
   }
 
   // 顶层显式 null：上游 schema 不接受，未设置的可选字段必须省略而非发 null。
@@ -1204,14 +1242,16 @@ function sanitizeMessagesRequest(body, cfg) {
         error: { message: 'messages 清洗后为空：至少需要一条内容非空的 user/assistant 消息', type: 'invalid_request_error' },
       };
     }
-    // 推理模型不支持 assistant prefill（messages 以 assistant 结尾），只有 haiku 支持。
-    // 这条没法静默兜底：丢末条丢信息，转成 user 改变语义——只能回明确错误。
+    // 推理模型不支持 assistant prefill（messages 以 assistant 结尾），只有 acceptsSampling
+    // 白名单里的模型（默认空 = 一个都没有）例外。这条没法静默兜底：丢末条丢信息、
+    // 转成 user 改变语义——只能回明确错误。模型名建议见 GET /v1/models（roster.withdrawn
+    // 里的 id，例如 claude-haiku-4-5，已经不可用了）。
     if (!acceptsSampling(body.model, cfg) && body.messages.at(-1)?.role === 'assistant') {
       return {
         body, notes,
         error: {
           message: `${body.model} 不支持 assistant prefill（messages 以 assistant 结尾）——推理模型的限制。` +
-            '可改用 claude-haiku-4-5，或在末尾补一条 user 消息。',
+            '请在末尾补一条 user 消息；本地无法静默改写而不改变语义。',
           type: 'invalid_request_error',
         },
       };
@@ -1471,11 +1511,69 @@ async function probeUpstream(target, pathname, cfg) {
     const body = await readStreamText(response);
     const models = response.statusCode === 200 ? catalogRows(JSON.parse(body))
       .map((m) => typeof m === 'string' ? m : m.id).filter((id) => isModelAllowed(id, cfg)) : [];
-    if (target.relay) target.relay.ready = response.statusCode === 200 && models.length > 0;
-    return { status: response.statusCode, models, modelCount: models.length, body };
+    // Classify a refusal so callers can distinguish "the account's shared pool is
+    // spent for the next hour" from a real outage. Both fail the probe, but they
+    // must not be reported (or retried) the same way.
+    const failure = response.statusCode === 200 ? null : classifyUpstreamFailure(response.statusCode, response.headers, body);
+    if (target.relay) {
+      target.relay.ready = response.statusCode === 200 && models.length > 0;
+      target.relay.probe = { at: new Date().toISOString(), status: response.statusCode, ...(failure || { kind: 'ok' }) };
+    }
+    return { status: response.statusCode, models, modelCount: models.length, body, failure };
   } catch (err) {
-    if (target.relay) target.relay.ready = false;
+    if (target.relay) { target.relay.ready = false; target.relay.probe = { at: new Date().toISOString(), status: 0, kind: 'error' }; }
     return { status: 0, models: [], modelCount: 0, error: err.message };
+  }
+}
+
+/**
+ * Relay refusals worth naming (observed 2026-10-24):
+ *   429 credit_exhausted_shared — the account's shared pool is spent;
+ *       retry-after 3600, x-mirasim-error mirasim-router:quota_exhausted,
+ *       x-router-failure "quota; scope=account", x-should-retry false.
+ * The body is Chinese+English prose, so only the machine fields are matched.
+ */
+function classifyUpstreamFailure(status, headers = {}, body = '') {
+  const noticed = String(headers['x-mirasim-error'] || '');
+  const scope = String(headers['x-router-failure'] || '');
+  const retryAfter = String(headers['retry-after'] || '');
+  const retry = /^\d+$/.test(retryAfter) ? Number(retryAfter)
+    : Number.isFinite(Date.parse(retryAfter)) ? Math.max(0, Math.round((Date.parse(retryAfter) - Date.now()) / 1000)) : null;
+  const text = typeof body === 'string' ? body.slice(0, 4096) : '';
+  let kind = 'error';
+  if (status === 429 || status === 529) {
+    kind = /quota_exhausted|credit_exhausted/i.test(noticed + text) ? 'quota' : 'rate_limit';
+  } else if ([401, 403].includes(status)) kind = 'auth';
+  else if (status >= 500) kind = 'server';
+  const detail = /credit_exhausted_shared/.test(text) ? 'credit_exhausted_shared'
+    : /shared_quota_unavailable/.test(text) ? 'shared_quota_unavailable'
+    : /rate_limited/.test(text) ? 'rate_limited' : null;
+  return { kind, status, detail, retry_after_sec: retry, error_code: noticed || null, scope: scope || null,
+    should_retry: String(headers['x-should-retry'] || '') === 'true' ? true
+      : String(headers['x-should-retry'] || '') === 'false' ? false : null };
+}
+
+const ROSTER_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * /v1/model-roster is the relay's own routing table. It keeps answering 200 with
+ * the credential while /v1/models is refused for exhausted shared quota, so it is
+ * both a fallback model list and proof that reachability is fine.
+ */
+async function fetchRoster(cfg, ctx = {}, { force = false, timeoutMs = 15000 } = {}) {
+  if (cfg.backend !== 'relay') return null;
+  const cachedAt = Date.parse(ctx.roster?.fetched_at || '');
+  if (!force && ctx.roster && Number.isFinite(cachedAt) && Date.now() - cachedAt < ROSTER_TTL_MS) return ctx.roster;
+  try {
+    const response = await getRelay(cfg).request({ path: '/v1/model-roster', signal: AbortSignal.timeout(timeoutMs) });
+    const raw = await readStreamText(response);
+    if (response.statusCode !== 200) throw Error(`model-roster HTTP ${response.statusCode}`);
+    ctx.roster = summarizeRoster(JSON.parse(raw));
+    ctx.roster_error = null;
+    return ctx.roster;
+  } catch (err) {
+    ctx.roster_error = err.message;
+    return ctx.roster || null;
   }
 }
 
@@ -1816,7 +1914,15 @@ function accountSummary(acct) {
     kimi_max_concurrency: cfg.forward.kimi_max_concurrency,
     model_fallback: cfg.constraints.model_fallback,
     disabled_models: cfg.constraints.disabled_models,
-    relay: relay ? { ready: relay.ready } : undefined,
+    relay: relay ? { ready: relay.ready, probe: relay.probe || null } : undefined,
+    // A dead refresh token needs a fresh sign-in; nothing else will fix it. The
+    // console shows this as "需要重新登录" on the account row.
+    needs_reauth: relay && typeof relay.needsReauth === 'function' ? Boolean(relay.needsReauth()) : false,
+    reauth_reason: relay && typeof relay.needsReauth === 'function' ? (relay.needsReauth()?.reason || null) : null,
+    roster: ctx.roster ? { fetched_at: ctx.roster.fetched_at, version: ctx.roster.version, served: ctx.roster.served.length,
+      withdrawn: ctx.roster.withdrawn.length, cli_min_versions: ctx.roster.cli_min_versions } : null,
+    roster_error: ctx.roster_error || null,
+    last_probe_failure: ctx.lastProbeFailure || null,
     quota: ctx.quota || { available: false, stale: true },
     membership: ctx.membership || { available: false, stale: true },
     sub2api: {
@@ -2022,7 +2128,6 @@ function fail503(res, reason) {
 function createBridgeServer(cfg, ctx, secret, maxConc) {
   if (typeof secret !== 'string' || !secret.trim()) throw new Error('bridge_secret 必须非空；回环监听也可能被反代到公网');
   const agent = new http.Agent({ keepAlive: true, maxSockets: Math.max(4, maxConc * 2) });
-  const replayLimit = cfg.forward.replay_buffer_mb * 1024 * 1024;
 
   const server = http.createServer(async (req, res) => {
     if (!ctx.hub) ctx.counters.total++;
@@ -2076,7 +2181,8 @@ function createBridgeServer(cfg, ctx, secret, maxConc) {
 
     actx.inflight++;
     try {
-      await handleProxy(req, res, acfg, actx, agent, replayLimit);
+      // Each account owns its limit; panel changes apply to the next request.
+      await handleProxy(req, res, acfg, actx, agent, acfg.forward.replay_buffer_mb * 1024 * 1024);
     } catch (err) {
       actx.counters.err++;
       bumpHistory(actx, 'err');
@@ -2118,7 +2224,9 @@ function handleInternal(req, res, cfg, ctx) {
     const body = JSON.stringify({
       version: VERSION,
       backend: cfg.backend,
-      relay: target?.relay ? { ready: target.relay.ready } : undefined,
+      relay: target?.relay ? { ready: target.relay.ready, probe: target.relay.probe || null } : undefined,
+      last_probe_failure: ctx.lastProbeFailure || null,
+      roster: ctx.roster ? { fetched_at: ctx.roster.fetched_at, version: ctx.roster.version, served: ctx.roster.served.length } : null,
       quota: ctx.quota || { available: false, stale: true },
       last_stream_error: ctx.lastStreamError || null,
       last_fallback: ctx.lastFallback || null,
@@ -2251,15 +2359,20 @@ function mergedHeaders(upstreamHeaders, extra = {}) {
 
 /** 约束清洗发现的问题走这里：回一个说人话的 400，而不是那句什么都诊断不了的含混报错 */
 function fail400(res, error) {
+  return failRequest(res, error, 400);
+}
+
+function failRequest(res, error, status) {
   const body = JSON.stringify({
     type: 'error',
     error: {
       type: error.type || 'invalid_request_error',
       message: `mirasim-bridge: ${error.message}`,
       ...(error.code ? { code: error.code } : {}),
+      ...(error.param ? { param: error.param } : {}),
     },
   });
-  res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
   res.end(body);
 }
 
@@ -2292,7 +2405,10 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   const { body, overflow } = await readBody(req, replayLimit);
   if (overflow) {
     countErr();
-    return fail503(res, `request body exceeds replay_buffer_mb (${cfg.forward.replay_buffer_mb}MB)`);
+    return failRequest(res, {
+      code: 'request_too_large',
+      message: `request body exceeds forward.replay_buffer_mb (${replayLimit / 1024 / 1024}MB); increase the request body limit in account settings or reduce the request size`,
+    }, 413);
   }
 
   const pathname = String(req.url || '').split('?')[0].replace(/\/+$/, '') || '/';
@@ -2302,15 +2418,21 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   }
   const wirePath = upstreamPath.split('?')[0].replace(/\/+$/, '');
   const isResponses = wirePath === '/v1/responses' || wirePath === '/v1/responses/compact';
+  // OpenAI-schema route. The relay serves it natively (probed 2026-10-24), so this is
+  // strict pass-through: the caller's body is forwarded byte-for-byte and the reply is
+  // streamed back verbatim. No Messages/Responses translation happens here.
+  const isChatCompletions = wirePath === '/v1/chat/completions';
   if (target.relay) {
     const control = ['/v1/models', '/v1/limits', '/v1/model-roster'].includes(wirePath);
-    if (!(control ? req.method === 'GET' : req.method === 'POST' && (isResponses || ['/v1/messages', '/v1/messages/count_tokens'].includes(wirePath)))) {
-      return fail400(res, { message: '直连模式支持 Messages、GPT Responses/compact，以及 models/limits/model-roster；不支持 Chat Completions' });
+    if (!(control ? req.method === 'GET'
+        : req.method === 'POST' && (isResponses || isChatCompletions || ['/v1/messages', '/v1/messages/count_tokens'].includes(wirePath)))) {
+      return fail400(res, { message: '直连模式支持 Messages、GPT Responses/compact、Chat Completions（透传），以及 models/limits/model-roster' });
     }
     // Match the signed path exactly, including requests ending with a slash.
     upstreamPath = wirePath + (req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : '');
   }
   if (isResponses && !target.relay) return fail400(res, { message: 'Responses 需要 backend=relay；session 后端仅支持 Messages' });
+  if (isChatCompletions && !target.relay) return fail400(res, { message: 'Chat Completions 需要 backend=relay；session 后端（本地 Mirasim 进程）仅暴露 Messages' });
   if (!target.relay && !(req.method === 'GET' && wirePath === '/v1/models')
       && !(req.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(wirePath))) {
     return fail400(res, { message: 'session 后端仅支持 POST /v1/messages、/v1/messages/count_tokens 与 GET /v1/models' });
@@ -2348,7 +2470,9 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     if (!isPlainObject(parsed)) return fail400(res, { message: '请求体必须是 JSON 对象' });
     if (parsed) {
       if (!hasCC(parsed.system) && needsCCIdentity(parsed.model, cfg)) ctx.counters.injected++;
-      const { body: cleaned, notes, error } = sanitizeMessagesRequest(parsed, cfg);
+      // Synthetic adaptive thinking is opt-in and needs the cached roster (the one
+      // source that marks a model adaptive); no extra network call on the hot path.
+      const { body: cleaned, notes, error } = sanitizeMessagesRequest(parsed, cfg, { roster: ctx.roster || null });
       if (error) {
         countErr();
         return fail400(res, error);
@@ -2508,7 +2632,16 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     // Observe the upstream frames even when aggregation fails or the model is refused.
     if (raw.trimStart().startsWith('{')) { try { usage?.json(JSON.parse(raw)); } catch {} }
     else { try { new TerminalEvents('responses', observeUsage).push(Buffer.from(raw)); } catch {} }
-    const response = aggregateResponses(raw);
+    let response;
+    try { response = aggregateResponses(raw); }
+    catch (err) {
+      countErr();
+      ctx.lastStreamError = { code: err.code || 'upstream_stream_invalid_response', request_id: crypto.randomBytes(8).toString('hex'),
+        model: String(cleanBody?.model || '').slice(0, 160), protocol: 'responses', at: new Date().toISOString(),
+        ...(err.upstream ? { upstream_code: err.upstream.code, param: err.upstream.param } : {}) };
+      if (err.status === 400 && err.upstream) return fail400(res, err.upstream);
+      return fail503(res, err.code || 'upstream_stream_invalid_response');
+    }
     observeUsage({ response });
     if (noteServedModel(ctx, cfg, cleanBody?.model, response.model)) {
       countErr();
@@ -2528,8 +2661,9 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     const requestId = crypto.randomBytes(8).toString('hex');
     eventHeaders['x-accel-buffering'] = 'no';
     eventHeaders['cache-control'] = 'no-cache, no-transform';
-    const record = (code) => {
-      ctx.lastStreamError = { code, request_id: requestId, model: String(cleanBody?.model || '').slice(0, 160), protocol: kind, at: new Date().toISOString() };
+    const record = (code, details) => {
+      ctx.lastStreamError = { code, request_id: requestId, model: String(cleanBody?.model || '').slice(0, 160), protocol: kind, at: new Date().toISOString(),
+        ...(details ? { upstream_code: details.code, param: details.param } : {}) };
       warn('stream_failure ' + JSON.stringify(ctx.lastStreamError));
     };
     try {
@@ -2546,9 +2680,11 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
       countErr();
       if (!res.destroyed) {
         const code = /^upstream_stream_[a-z_]+$/.test(err.code || '') ? err.code : 'upstream_stream_interrupted';
-        record(code);
-        if (!res.headersSent) fail503(res, code);
-        else endWithStreamError(res, kind, code);
+        record(code, err.upstream);
+        if (!res.headersSent) {
+          if (err.status === 400 && err.upstream) fail400(res, err.upstream);
+          else fail503(res, code);
+        } else endWithStreamError(res, kind, code, err.upstream);
       }
     } finally { upRes.destroy(); }
     return;
@@ -3067,8 +3203,13 @@ function cmdSelftest() {
   // max_tokens：缺失/0/负数回落默认；合法值不动；刻意不做 thinking 补偿
   eq('清洗：max_tokens=0 回落默认', san({ model: 'claude-sonnet-5', messages: [msg('user', 'hi')], max_tokens: 0 }).body.max_tokens, 8192);
   eq('清洗：max_tokens=5 保留', san({ model: 'claude-sonnet-5', messages: [msg('user', 'hi')], max_tokens: 5 }).body.max_tokens, 5);
-  // 模型名 [1M] 后缀、黑名单
-  eq('清洗：[1M] 后缀报明确错', Boolean(san({ model: 'claude-opus-5[1M]', messages: [msg('user', 'hi')], max_tokens: 10 }).error), true);
+  // 模型名 [1M] 后缀：只是 context window 标记，按裸 id 校验、原样透传
+  {
+    const r = san({ model: 'claude-opus-5[1M]', messages: [msg('user', 'hi')], max_tokens: 10 });
+    eq('清洗：[1M] 后缀透传不报错', [r.error, r.body.model, r.notes.includes('model_1m_suffix')], [null, 'claude-opus-5[1M]', true]);
+    // 后缀不参与黑名单/白名单匹配
+    eq('清洗：[1M] 后缀仍命中黑名单', san({ model: 'claude-fable-5[1m]', messages: [msg('user', 'hi')], max_tokens: 10 }).error?.code, 'model_blocked');
+  }
   {
     const r = san({ model: 'claude-fable-5', messages: [msg('user', 'hi')], max_tokens: 10 });
     eq('清洗：黑名单模型报明确错', [Boolean(r.error), r.error?.code], [true, 'model_blocked']);
@@ -3146,7 +3287,7 @@ function diagnosticRequest(target, pathname, payload, { timeoutMs = 60000 } = {}
     const res = await target.relay.request({ path: pathname, method: payload ? 'POST' : 'GET',
       body: payload ? Buffer.from(JSON.stringify(payload)) : Buffer.alloc(0), signal: AbortSignal.timeout(timeoutMs) });
     const ttfb = Date.now() - started;
-    return { status: res.statusCode, raw: await readStreamText(res), ttfb_ms: ttfb, elapsed_ms: Date.now() - started };
+    return { status: res.statusCode, raw: await readStreamText(res), headers: res.headers, ttfb_ms: ttfb, elapsed_ms: Date.now() - started };
   })();
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -3161,7 +3302,7 @@ function diagnosticRequest(target, pathname, payload, { timeoutMs = 60000 } = {}
       ttfb = Date.now() - started;
       readStreamText(res).then((raw) => {
         clearTimeout(timer);
-        resolve({ status: res.statusCode, raw, ttfb_ms: ttfb, elapsed_ms: Date.now() - started });
+        resolve({ status: res.statusCode, raw, headers: res.headers, ttfb_ms: ttfb, elapsed_ms: Date.now() - started });
       }, (err) => { clearTimeout(timer); err.ttfb_ms = ttfb; reject(err); });
     });
     timer = setTimeout(() => req.destroy(new Error(`检测 ${timeoutMs / 1000} 秒超时；不代表凭证失效`)), timeoutMs);
@@ -3178,6 +3319,15 @@ function summarizeModelResponse(result) {
   if (result.status !== 200) {
     try { const v = JSON.parse(result.raw); out.error = v.error?.message || v.message || result.raw.slice(0, 500); }
     catch { out.error = result.raw.slice(0, 500); }
+    if (result.status === 429 || result.status === 529) {
+      // Quota exhaustion reads as a generic failure otherwise; surface it so the
+      // panel/test output says "shared pool spent" instead of "upstream missing".
+      const failure = classifyUpstreamFailure(result.status, result.headers || {}, result.raw);
+      out.failure = failure;
+      out.error = failure.kind === 'quota'
+        ? `上游共享额度已用尽${failure.retry_after_sec ? `（${failure.retry_after_sec}s 后重试）` : ''}：账号与凭证有效，需要等待额度重置或接入自有账号`
+        : failure.kind === 'rate_limit' ? `上游限流${failure.retry_after_sec ? `（${failure.retry_after_sec}s 后重试）` : ''}` : out.error;
+    }
     return out;
   }
   const event = (e) => {
@@ -3387,8 +3537,24 @@ async function accountHealthTick(acct, { tickCount, withSub2api, args, recheckEv
     } else if (t) {
       const probe = await probeUpstream(t, '/v1/models', cfg);
       forwardOk = probe.status === 200 && probe.modelCount > 0;
+      if (!forwardOk && probe.failure) {
+        // Quota exhaustion is an account-level fact, not a dead credential: keep
+        // the account registered and say why, instead of a bare "probe failed".
+        ctx.lastProbeFailure = probe.failure;
+        warn(`${tag} 健康探测失败 HTTP ${probe.failure.status} ${probe.failure.detail || probe.failure.kind}`
+          + (probe.failure.retry_after_sec ? `，上游要求 ${probe.failure.retry_after_sec}s 后重试` : ''));
+        if (probe.failure.kind === 'quota') {
+          // The roster still answers while inference is refused; it proves the
+          // relay and credential are alive and supplies the routable model list.
+          const roster = await fetchRoster(cfg, ctx);
+          if (roster) {
+            ctx.counters.roster_fallback = (ctx.counters.roster_fallback || 0) + 1;
+            log(`${tag} 共享额度耗尽，改用 /v1/model-roster 确认可达（${rosterIds(roster).length} 个可路由模型）`);
+          }
+        }
+      } else ctx.lastProbeFailure = null;
       if (ctx.keepalive && t.is_keepalive && [401, 403].includes(probe.status)) ctx.keepalive.noteUpstreamAuthFail();
-      if (!forwardOk) warn(`${tag} 健康探测失败 HTTP ${probe.status} ${probe.error || ''}`);
+      if (!forwardOk && !probe.failure) warn(`${tag} 健康探测失败 HTTP ${probe.status} ${probe.error || ''}`);
     } else {
       warn(`${tag} 健康探测：没有可用的 agent 会话`);
     }
@@ -4065,4 +4231,5 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
   targetCache, invalidateTarget, createBridgeServer, mergedHeaders, readStreamText,
   requestUpstream, ScheduleState, s2, cmdRegister, cmdDoctor, loadState, saveState,
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
-  getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest };
+  getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest,
+  fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId };

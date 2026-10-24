@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const b = require('../mirasim-bridge');
-const { TerminalEvents } = require('../lib/sse');
+const { TerminalEvents, parseEventFrame, responseFailure } = require('../lib/sse');
 const listen = (s) => new Promise((r) => s.listen(0, '127.0.0.1', () => r(s.address().port)));
 const close = (s) => new Promise((r) => { s.close(r); s.closeAllConnections(); });
 const frame = (data) => 'data: ' + JSON.stringify(data) + '\n\n';
@@ -79,4 +79,24 @@ test('Responses terminal errors and incompatible events cannot be counted as suc
   assert.equal(e.failed, true);
   assert.throws(() => new TerminalEvents('responses').push(Buffer.from(frame({ type: 'message_stop' }))), /protocol_mismatch/);
   assert.throws(() => new TerminalEvents('messages').push(Buffer.from('data: [DONE]\n\n')), /protocol_mismatch/);
+});
+
+test('nonstandard pretty error frames are recognized; malformed successes and untrusted diagnostics stay rejected', () => {
+  const error = { type: 'error', error: { type: 'invalid_request_error', message: "Missing required parameter: 'tools[0].description'." } };
+  const pretty = 'data: ' + JSON.stringify(error, null, 2);
+  for (const raw of [pretty, pretty.replace(/\n/g, '\r\n'), 'event: error\n' + pretty]) assert.deepEqual(parseEventFrame(raw), error);
+  const multiline = JSON.stringify(error, null, 2).split('\n').map(line => 'data: ' + line).join('\n');
+  assert.deepEqual(parseEventFrame(multiline), error);
+  const parser = new TerminalEvents('responses');
+  for (const byte of Buffer.from(pretty + '\n\n')) parser.push(Buffer.from([byte]));
+  assert.equal(parser.failed, true); assert.equal(parser.error.status, 400);
+  assert.equal(parser.error.upstream.param, 'tools[0].description');
+  for (const bad of ['data: {\n "type":"response.completed",\n "response":{"status":"completed"}\n}', 'data: {\ninvalid\n}', 'data: []']) {
+    assert.throws(() => parseEventFrame(bad), /upstream_stream_invalid_/);
+  }
+  const secret = responseFailure({ type: 'error', error: { type: 'invalid_request_error', code: 'Bearer private', param: 'secret\nkey', message: 'PRIVATE' } });
+  assert.doesNotMatch(JSON.stringify(secret), /Bearer|secret|PRIVATE/);
+  assert.equal(responseFailure({ error: { type: 'invalid_request_error', param: 'PRIVATE_SECRET' } }).upstream.param, undefined);
+  assert.equal(responseFailure({ error: { type: 'invalid_request_error', message: '[ObjectParam] [input[0].tools[0].description] [invalid_type] private-value' } }).upstream.param, 'input[0].tools[0].description');
+  assert.equal(responseFailure({ type: 'error', error: { type: 'authentication_error' } }).status, 503);
 });

@@ -40,7 +40,9 @@ class DeploymentTests(unittest.TestCase):
         self.version = '0.6.0'
         # What the new image carries at HOST_FILES paths; tests may alter it.
         self.image_files = {'deploy-agent.py': b'NEW_AGENT = 2\n', 'panel-host.py': b'PANEL = 1\n',
-                            'web/index.html': b'<html>', 'web/app.js': b'new app', 'web/style.css': b'css', 'web/icon.png': b'PNG'}
+                            'web/index.html': b'<html>', 'web/app.js': b'new app', 'web/style.css': b'css',
+                            'web/tokens.css': b':root{}', 'web/modal.js': b'//modal', 'web/undo.js': b'//undo',
+                            'web/icon.png': b'PNG'}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -346,7 +348,7 @@ class HostSelfUpdateTests(DeploymentTests):
         self.assertEqual((self.host / 'web' / 'app.js').read_text(), 'old app')
         self.assertFalse((self.host / 'panel-host.py').exists(), 'a file added by the release is removed again')
         self.assertEqual(self.calls[-1][0], 'systemd-run')
-        self.assertEqual(agent.status()['host_restored'], ['deploy-agent.py', 'panel-host.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/icon.png'])
+        self.assertEqual(agent.status()['host_restored'], ['deploy-agent.py', 'panel-host.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/tokens.css', 'web/modal.js', 'web/undo.js', 'web/icon.png'])
 
     def test_container_failure_after_staging_leaves_host_tools_untouched(self):
         agent = self.agent()

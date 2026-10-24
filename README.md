@@ -1,6 +1,8 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.8.9**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前本地版本 **0.9.0（未发布）**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**0.9.0 本地升级包**：控制台整体重写为设计令牌体系（对比度全部 ≥ 4.5:1、rem 字号、44px 触控、三态主题、深链路由、命令面板、无阻塞对话框），静态资源改用 ETag + 304 + gzip；协议侧放通 `/v1/chat/completions`、透传 `[1m]` 模型后缀、完整解析 roster `agents`，并新增**登录失效后可重新登录**（只替换凭证，不改账号配置，无需重启）。升级前请读 [0.9.0 说明](UPGRADE-0.9.0.md) —— 宿主机后台必须一起更新。
 
 **0.8.9**：恢复邮箱验证码入口，新增 portable/auth-device JSON 凭证导入、取消登录和导入重试保护。在“账号管理 → 新增账号”选择邮箱登录，或选择 JSON 文件后导入。导入前校验身份，仅保存必要凭证，可自动托管到当前 bridge；同名 profile 不覆盖。操作和验证范围见 [网页后台说明](PANEL.md) · [账号导入说明](ACCOUNTS.md)。
 
@@ -27,6 +29,8 @@
 **保持原版、使用配套容器请读 [DOCKER.md](DOCKER.md)**；原生 systemd 部署见 [DEPLOY.md](DEPLOY.md)。变更记录见 [CHANGELOG.md](CHANGELOG.md)。[DESIGN.md](DESIGN.md) 保留历史实验，运行方式与默认参数以本 README、示例配置和当前代码为准。
 
 ## 验证范围
+
+0.9.0 本地包：234 项 Node 回归、58 项 Python 测试、68 项自测通过。新增四类长期门禁：`design-tokens`（两套主题 × 8 文字令牌 × 8 背景的对比度、主题令牌对齐）、`a11y-static`（caption/scope、控件 label、跳转链接、禁止阻塞对话框、主题与 hash 路由）、`panel-assets`（每个注册资源真实存在以防打包漏文件、304、gzip）、`reauth`（永久拒绝与临时失败的区分、重新登录只换凭证）。对 `relay.mirasim.ai` 的实测确认：控制接口（`/v1/models`、`/v1/limits`、`/v1/model-roster`）不校验请求签名，`/v1/device/session` 校验；`/v1/chat/completions` 是真实路由（封装请求得 429，伪路径得 404 `not an endpoint on this router`）；未封装的裸签名会被判 `client_outdated`。**未验证**：`adaptive_effort` 的 `thinking.type=adaptive` 线格式与 `/v1/chat/completions` 的真实推理响应——账号共享额度用尽（`credit_exhausted_shared`，`retry-after: 3600`），所有推理请求在请求体校验前即返回 429；真实浏览器与屏幕阅读器的人工走查同样未进行。
 
 0.8.9：186 项 Node 回归、58 项 Python 测试、67 项自测通过。真实邮箱发送接口返回 200；实际 portable JSON 经 `/auth/me` 校验、临时导入通过。Chrome 使用模拟邮箱服务验证错误重试、保存及托管，并验证 JSON 导入响应丢失后的重试。真实邮箱验证码校验尚未完成实测；发布不等于生产服务器已升级。
 
@@ -89,7 +93,7 @@ node mirasim-bridge.js serve
 |---|---|
 | `backend` | `relay` 或 `session`；示例/新安装用 relay，未声明的旧配置保持 session |
 | `relay.setting_json` | 可迁移凭证文件；空值使用服务用户的 `~/.mirasim/setting.json` |
-| `relay.client_version` / `relay.collect` | 参考协议版本 `0.0.354` / 默认发送关闭收集信号 |
+| `relay.client_version` / `relay.collect` | 参考协议版本 `0.0.354` / 默认发送关闭收集信号。实测上游不校验该字段取值，签名规范才是关键，故保持现有值 |
 | `listen.host` / `listen.port` | `127.0.0.1:8787`；非回环监听必须设置密钥 |
 | `bridge_secret` | 调用桥接器的密钥，与 sub2api 管理 Key 不同；安装时随机生成 |
 | `sub2api.base_url` | 管理 API 地址，例如 `https://sub2api.example.com` |
@@ -105,7 +109,7 @@ node mirasim-bridge.js serve
 | `quota.enabled` / `quota.sync_notes` / `quota.interval_sec` | 默认开启查询和备注同步，每 300 秒一次 |
 | `diagnostics.timeout_sec` / `diagnostics.max_tokens` | bridge 检测默认 30 秒、128 token，不改变 sub2 内置测试超时 |
 | `keepalive.server_cjs` | Linux 安装后为 `/opt/mirasim-bridge/server.cjs` |
-| `forward.replay_buffer_mb` | 入站请求体缓冲上限 8 MB，超限拒绝 |
+| `forward.replay_buffer_mb` | 入站请求体缓冲上限默认 64 MB（1 MB = 1024² 字节），超限返回 413；后台“账号管理 → 运行设置”可按账号调整并立即生效，已有显式配置保持原值 |
 | `forward.upstream_headers_timeout_ms` | 等待上游响应头最长 60 秒 |
 | `forward.upstream_idle_timeout_ms` | 上游连接无活动最长 300 秒；有数据的 SSE 可持续更久 |
 | `forward.log_failures` | 默认 false；开启后记录截断的错误载荷，可能含聊天内容 |

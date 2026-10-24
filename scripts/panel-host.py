@@ -1,8 +1,11 @@
 """Authenticated host console. Fixed operations only, never a general Docker API."""
+import gzip
+import hashlib
 import hmac
 import json
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -10,10 +13,67 @@ from urllib.parse import urlsplit
 
 ASSETS = {'/panel': ('index.html', 'text/html'), '/panel/': ('index.html', 'text/html'),
           '/panel/app.js': ('app.js', 'text/javascript'), '/panel/style.css': ('style.css', 'text/css'),
-          '/panel/icon.png': ('icon.png', 'image/png')}
+          '/panel/tokens.css': ('tokens.css', 'text/css'), '/panel/modal.js': ('modal.js', 'text/javascript'),
+          '/panel/undo.js': ('undo.js', 'text/javascript'), '/panel/icon.png': ('icon.png', 'image/png')}
+SECURITY_HEADERS = {'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+                    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status', 'login/cancel',
               'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs', 'usage', 'usage/pricing', 'account/import'}
 READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'usage'}
+
+# The host handler runs on a ThreadingHTTPServer: guard the shared cache.
+_asset_cache = {}
+_asset_lock = threading.Lock()
+_missing_reported = set()
+
+
+def asset_web_dir():
+    here = Path(__file__).parent
+    return here / 'web' if (here / 'web').is_dir() else here.parent / 'web'
+
+
+def load_asset(full):
+    """Return {etag, raw, gzip} for a file, re-reading only when mtime/size changed."""
+    st = full.stat()
+    key = str(full)
+    with _asset_lock:
+        hit = _asset_cache.get(key)
+        if hit and hit['mtime_ns'] == st.st_mtime_ns and hit['size'] == st.st_size:
+            return hit
+    raw = full.read_bytes()
+    entry = {'mtime_ns': st.st_mtime_ns, 'size': st.st_size,
+             'etag': '"' + hashlib.sha256(raw).hexdigest()[:32] + '"', 'raw': raw, 'gzip': None}
+    with _asset_lock:
+        _asset_cache[key] = entry
+    return entry
+
+
+def accepts_gzip(header):
+    if not header:
+        return False
+    explicit = wildcard = None
+    for part in header.split(','):
+        token, *params = part.strip().lower().split(';')
+        if token not in ('gzip', '*'): continue
+        q = next((p.strip() for p in params if p.strip().startswith('q=')), None)
+        try:
+            value = 1 if q is None else float(q[2:] or 0)
+        except ValueError:
+            continue
+        if token == 'gzip': explicit = value
+        elif wildcard is None: wildcard = value
+    # RFC 9110: an explicit gzip entry wins over the * wildcard.
+    return (wildcard or 0 if explicit is None else explicit) > 0
+
+
+def matches_etag(header, etag):
+    if not header:
+        return False
+    for value in header.split(','):
+        candidate = value.strip()
+        if candidate == '*' or (candidate[2:] if candidate.startswith('W/') else candidate) == etag:
+            return True
+    return False
 
 
 def command_input(args, data, timeout=55):
@@ -252,21 +312,68 @@ def handler(agent, token, fallback, persist):
         def do_GET(self):
             route = '/panel' if self.path == '/' else self.path
             if route not in ASSETS:
+                # Unknown panel paths are ours to answer: never hand them to the deployment API.
+                if route.startswith('/panel/'):
+                    return self.not_found()
                 return super().do_GET()
             file, mime = ASSETS[route]
-            assets = Path(__file__).parent / 'web'
-            if not assets.is_dir():
-                assets = Path(__file__).parents[1] / 'web'
-            raw = (assets / file).read_bytes()
+            full = asset_web_dir() / file
             if file == 'index.html':
-                raw = raw.replace(b'data-mode="bridge"', b'data-mode="host"')
+                # The shell names the asset URLs; never cache it or the page keeps loading old files.
+                try:
+                    raw = full.read_bytes().replace(b'data-mode="bridge"', b'data-mode="host"')
+                except OSError:
+                    self.warn_missing(file)
+                    return self.not_found()
+                headers = {'Content-Type': mime + '; charset=utf-8', 'Content-Length': str(len(raw)), 'Cache-Control': 'no-store', **SECURITY_HEADERS}
+                self.send_response(200)
+                for key, value in headers.items(): self.send_header(key, value)
+                self.end_headers()
+                return self.wfile.write(raw)
+            try:
+                entry = load_asset(full)
+            except OSError:
+                self.warn_missing(file)
+                return self.not_found()
+            # Text assets are compressed for clients that accept it, so the response varies on that header.
+            compressible = mime.startswith('text/')
+            headers = {'Content-Type': (mime if mime.startswith('image/') else mime + '; charset=utf-8'),
+                       'Cache-Control': 'no-cache', 'ETag': entry['etag'], **SECURITY_HEADERS}
+            if compressible:
+                headers['Vary'] = 'Accept-Encoding'
+            if matches_etag(self.headers.get('If-None-Match'), entry['etag']):
+                self.send_response(304)
+                for key, value in headers.items():
+                    if key != 'Content-Type': self.send_header(key, value)
+                self.end_headers()
+                return
+            body = entry['raw']
+            if compressible and accepts_gzip(self.headers.get('Accept-Encoding')):
+                with _asset_lock:
+                    if entry['gzip'] is None:
+                        packed = gzip.compress(entry['raw'], compresslevel=6, mtime=0)
+                        entry['gzip'] = packed if len(packed) < len(entry['raw']) else b''
+                    packed = entry['gzip']
+                if packed:
+                    headers['Content-Encoding'] = 'gzip'
+                    body = packed
+            headers['Content-Length'] = str(len(body))
             self.send_response(200)
-            for key, value in {'Content-Type': mime + ('' if mime.startswith('image/') else '; charset=utf-8'), 'Content-Length': str(len(raw)),
-                               'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-                               'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"}.items():
-                self.send_header(key, value)
+            for key, value in headers.items(): self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(raw)
+            self.wfile.write(body)
+
+        def not_found(self):
+            self.send_response(404)
+            self.send_header('Content-Length', '0')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.end_headers()
+
+        def warn_missing(self, file):
+            if file in _missing_reported: return
+            _missing_reported.add(file)
+            print(f'[panel] WARN missing web asset: {file}', file=sys.stderr)
 
         def do_POST(self):
             if self.path != '/panel/api':

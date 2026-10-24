@@ -53,6 +53,96 @@ test('JSON aggregation retains encrypted reasoning omitted by a partial terminal
   assert.deepEqual(aggregateResponses(raw.replace(JSON.stringify(terminal), JSON.stringify({ ...terminal, output: [reasoning, tool, answer] }))).output, [reasoning, tool, answer]);
 });
 
+test('namespace tools receive only missing descriptions, including Lite and compact; histories stay intact', () => {
+  const tool = { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }] };
+  const original = { model: 'gpt-test', tools: [tool, { ...tool, name: 'documented', description: 'Keep this description' }],
+    input: [{ type: 'additional_tools', role: 'developer', tools: [tool] },
+      { type: 'configuration_update', reasoning: { effort: 'high' } },
+      { type: 'reasoning', encrypted_content: 'opaque' },
+      { type: 'function_call_output', call_id: 'call-1', output: 'private-result' }] };
+  const before = structuredClone(original);
+  for (const compact of [false, true]) {
+    const out = normalizeResponses(original, { compact }).body;
+    assert.equal(out.tools[0].description, '');
+    assert.equal(out.tools[1].description, 'Keep this description');
+    assert.equal(out.input[0].tools[0].description, '');
+    assert.deepEqual(out.tools[0].tools, tool.tools);
+    assert.deepEqual(out.input.slice(1), original.input.slice(1));
+  }
+  assert.deepEqual(original, before);
+});
+
+test('Responses errors in malformed relay SSE keep safe schema details and never return terminal success', () => {
+  const failure = { type: 'error', error: { type: 'invalid_request_error', code: null,
+    message: "[ObjectParam] [tools[0].description] [missing_required_parameter] Missing required parameter: 'tools[0].description'. PRIVATE_SECRET" } };
+  const broken = 'data: ' + JSON.stringify(failure, null, 2) + '\n\n';
+  for (const raw of [broken, frame(failure), JSON.stringify(failure),
+    broken + frame({ type: 'response.completed', response: { status: 'completed', output: [] } }),
+    frame({ type: 'response.failed', response: { error: failure.error } })]) {
+    assert.throws(() => aggregateResponses(raw), err => {
+      assert.equal(err.status, 400);
+      assert.equal(err.upstream.code, 'missing_required_parameter');
+      assert.equal(err.upstream.param, 'tools[0].description');
+      assert.doesNotMatch(JSON.stringify(err), /PRIVATE_SECRET/);
+      return true;
+    });
+  }
+});
+
+test('GPT errors before/after streaming become actionable failures without retrying or leaking upstream content', { timeout: 15000 }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-gpt-errors-'));
+  let calls = 0, mode = 'early', seen;
+  const failure = { type: 'error', error: { type: 'invalid_request_error', code: 'unsupported_value', param: 'input[0].type', message: 'PRIVATE_SECRET' } };
+  const upstream = http.createServer(async (req, res) => {
+    let raw = ''; for await (const c of req) raw += c;
+    if (req.url === '/v1/device/session') return res.end('{"ticket":"ticket-test","expiresIn":600}');
+    calls++; seen = JSON.parse(raw);
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (mode === 'late') {
+      res.write(frame({ type: 'response.created', response: { model: seen.model, status: 'in_progress' } }));
+      await new Promise(r => setTimeout(r, 25));
+    } else res.write(frame({ type: 'codex.response.metadata', headers: { 'x-codex-turn-state': 'PRIVATE_TURN_STATE' } }));
+    // Exercise fragmentation, including the nonstandard error JSON over multiple chunks.
+    const event = 'data: ' + JSON.stringify(failure, null, 2) + '\n\n';
+    res.write(event.slice(0, 19));
+    res.end(event.slice(19));
+  });
+  const upPort = await listen(upstream), cfg = b.deepMerge({}, b.DEFAULT_CONFIG);
+  cfg.backend = 'relay'; cfg._config_path = path.join(dir, 'config.json'); cfg.relay.url = cfg.relay.auth_url = `http://127.0.0.1:${upPort}`;
+  cfg.relay.setting_json = 'setting.json'; cfg.bridge_secret = 'test-key';
+  fs.writeFileSync(path.join(dir, 'setting.json'), JSON.stringify(createCredential({ access: 'mock-access', refresh: 'mock-refresh' })));
+  const ctx = b.newAccountCtx('main'), server = b.createBridgeServer(cfg, ctx, cfg.bridge_secret, 2), port = await listen(server);
+  t.after(async () => {
+    await close(server); await close(upstream); await ctx.usageStore?.queue;
+    assert.equal(path.dirname(dir), os.tmpdir()); assert.ok(path.basename(dir).startsWith('bridge-gpt-errors-')); fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const target = { host: '127.0.0.1', port, prefix: '', headers: { 'x-api-key': cfg.bridge_secret } };
+  const call = async (route, payload) => {
+    const r = await b.diagnosticRequest(target, route, payload);
+    await ctx.usageStore?.queue;
+    for (let i = 0; ctx.inflight && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(ctx.inflight, 0);
+    return r;
+  };
+  const body = { model: 'gpt-test', input: [{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: [] }] }, { role: 'user', content: 'hi' }] };
+  for (const stream of [false, true]) {
+    for (const route of ['/v1/responses', '/backend-api/codex/responses']) {
+      const before = calls, r = await call(route, { ...body, stream });
+      assert.equal(r.status, 400, r.raw); assert.equal(calls, before + 1);
+      assert.equal(JSON.parse(r.raw).error.param, 'input[0].type');
+      assert.match(r.raw, /unsupported_value/); assert.doesNotMatch(r.raw, /PRIVATE_|response.completed|SyntaxError/);
+      assert.equal(ctx.lastStreamError.upstream_code, 'unsupported_value');
+      assert.equal(seen.input[0].tools[0].description, '');
+    }
+  }
+  mode = 'late';
+  const before = calls, r = await call('/v1/responses', { ...body, stream: true });
+  assert.equal(r.status, 200); assert.equal(calls, before + 1);
+  assert.match(r.raw, /response.created/); assert.match(r.raw, /event: error/); assert.match(r.raw, /unsupported_value/);
+  assert.doesNotMatch(r.raw, /PRIVATE_|response.completed/);
+  assert.equal(ctx.counters.ok, 0); assert.equal(ctx.counters.err, 5);
+});
+
 test('real bridge routes preserve GPT state and abort late reported model substitution', { timeout: 20000 }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-gpt-fidelity-'));
   let mode = 'normal', seen = [], calls = 0;

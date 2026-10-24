@@ -27,12 +27,15 @@ $sourceFiles = @(
     'tests/accounts-quota.test.js', 'tests/model-latency.test.js',
     'scripts/deploy-agent.py', 'tests/test_network_deploy.py', 'NETWORK-DEPLOY.md', '.github/workflows/publish.yml',
     'scripts/issue-deploy-command.py', '.github/workflows/remote-deploy.yml', 'REMOTE-CONTROL.md', 'PANEL.md',
-    'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/icon.png',
-    'tests/panel.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
+    'scripts/panel-host.py', 'scripts/install-panel.py', 'web/index.html', 'web/app.js', 'web/style.css', 'web/tokens.css', 'web/modal.js', 'web/undo.js', 'web/icon.png',
+    'tests/panel.test.js', 'tests/panel-assets.test.js', 'tests/test_panel_host.py', 'tests/sse-failures.test.js', 'STREAM-TROUBLESHOOTING.md', 'HERMES.md',
     'CODEX.md', 'VERIFY.md', 'tests/identity-fallback.test.js', 'tests/codex-account.test.js',
     'tests/hosted-accounts.test.js', 'UPGRADE-0.8.0.md', 'tests/web-panel.test.js', 'scripts/verify-package.py', 'RECOVERY.md', 'tests/test_release_source.py', 'UPDATE-TROUBLESHOOTING.md',
     'lib/membership.js', 'lib/window-keeper.js', 'tests/membership-window.test.js', 'MEMBERSHIP-WINDOWS.md',
-    'lib/usage.js', 'tests/usage.test.js', 'USAGE.md', 'tests/gpt-fidelity.test.js'
+    'lib/usage.js', 'tests/usage.test.js', 'USAGE.md', 'tests/gpt-fidelity.test.js',
+    'tests/request-body.test.js', 'UPGRADE-0.8.10.md', 'UPGRADE-0.9.0.md',
+    'lib/roster.js', 'tests/latest-mirasim.test.js', 'tests/quota-roster.test.js',
+    'tests/design-tokens.test.js', 'tests/a11y-static.test.js', 'tests/reauth.test.js', 'tests/mirasim-adapters.test.js'
 )
 
 function Get-ByteHash([byte[]]$Bytes) {

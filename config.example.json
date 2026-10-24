@@ -42,7 +42,7 @@
     "min_dwell_sec": 60
   },
   "forward": {
-    "replay_buffer_mb": 8,
+    "replay_buffer_mb": 64,
     "max_concurrency": 2,
     "kimi_max_concurrency": 1,
     "log_failures": false,
@@ -66,7 +66,9 @@
       "deepseek-v4-flash-vision-exp"
     ],
     "kimi_default_effort": "low",
-    "gpt_default_effort": "high"
+    "gpt_default_effort": "high",
+    "adaptive_effort": false,
+    "adaptive_default_effort": ""
   },
   "keepalive": {
     "enabled": true,

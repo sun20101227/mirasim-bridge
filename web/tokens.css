@@ -1,0 +1,296 @@
+/* ==========================================================================
+   Mirasim 控制台 — 设计令牌
+   三层结构：
+     Tier 1  参考色板   —— 原始颜色值，组件永远不直接使用
+     Tier 2  系统语义   —— 组件真正消费的变量
+     Tier 3  组件令牌   —— 字号 / 间距 / 圆角 / 触控 / 动效
+
+   主题块共四份，令牌集合必须完全一致：
+     :root                                默认（浅色）
+     :root[data-theme="light"]            显式浅色（覆盖系统深色偏好）
+     :root[data-theme="dark"]             显式深色
+     @media (prefers-color-scheme: dark)  系统深色（未显式指定浅色时）
+   ========================================================================== */
+
+/* -------------------------------------------------------------- 浅色默认 */
+:root {
+  /* Tier 1 — reference palette (raw values, never used by components directly) */
+  --pal-neutral-0:#ffffff;--pal-neutral-50:#f7f7fc;--pal-neutral-100:#f4f4fa;
+  --pal-neutral-200:#e5e4f0;--pal-neutral-300:#d2d0e4;
+  --pal-neutral-500:#66647f;--pal-neutral-600:#63617c;--pal-neutral-900:#1f1e3a;
+  --pal-brand-50:#ecebfb;--pal-brand-500:#4f46c9;--pal-brand-700:#3f38ad;
+  --pal-green-50:#e4f4ea;--pal-green-700:#1b7350;
+  --pal-amber-50:#fdf2dc;--pal-amber-700:#855500;
+  --pal-red-50:#fdecea;--pal-red-700:#b23b2e;
+  --pal-blue-50:#e7eef8;--pal-blue-700:#2d5f9a;
+  --pal-night-950:#12102a;--pal-night-800:#24214a;
+  --pal-night-300:#b6b3d6;--pal-night-50:#f4f3ff;
+  --pal-black:#000000;
+
+  /* Tier 2 — system semantics (what components consume) */
+  --bg:#f4f4fa;--surface:#ffffff;--surface-2:#f7f7fc;
+  --text:#1f1e3a;--muted:#66647f;--faint:#63617c;
+  --line:#e5e4f0;--line-strong:#d2d0e4;
+  --accent:#4f46c9;--accent-hover:#3f38ad;--accent-soft:#ecebfb;--on-accent:#ffffff;
+  --ok:#1b7350;--ok-soft:#e4f4ea;
+  --warn:#855500;--warn-soft:#fdf2dc;
+  --bad:#b23b2e;--bad-soft:#fdecea;
+  --info:#2d5f9a;--info-soft:#e7eef8;
+  --side:#12102a;--side-text:#b6b3d6;--side-strong:#f4f3ff;--side-active:#24214a;
+  --overlay:#12102ab3;
+  --focus-ring:var(--accent);
+  --focus-ring-side:var(--side-strong);
+  --shadow:0 1px 2px #1a184010,0 4px 16px #1a184008;
+  --shadow-lg:0 24px 80px #12102a33;
+  color-scheme:light;
+
+  /* Tier 3 — component tokens (button height, card padding, radius, motion) */
+  --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  --fs-display:1.625rem;--fs-title:1.0625rem;--fs-body:0.875rem;
+  --fs-label:0.78125rem;--fs-meta:0.75rem;--fs-micro:0.65625rem;
+  --lh-tight:1.25;--lh-body:1.6;
+  --fw-regular:400;--fw-medium:500;--fw-semibold:600;--fw-bold:650;
+  --space-1:0.25rem;--space-2:0.5rem;--space-3:0.75rem;--space-4:1rem;
+  --space-5:1.25rem;--space-6:1.5rem;--space-7:2rem;--space-8:2.5rem;
+  --radius-sm:0.5rem;--radius-md:0.75rem;--radius-lg:1rem;--radius-pill:999rem;
+  --radius:var(--radius-md);
+  --tap-min:44px;--tap-min-compact:32px;
+  --motion-fast:120ms;--motion-base:200ms;--motion-slow:300ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+  --ease-emphasized:cubic-bezier(.2,0,0,1.2);
+  --card-pad:var(--space-6);--card-pad-compact:var(--space-4);
+  --btn-height:var(--tap-min-compact);--btn-pad-x:var(--space-4);
+  --field-height:var(--tap-min);
+  --sidebar-w:14.25rem;--sidebar-w-compact:12.25rem;--content-max:90rem;
+  --page-pad-x:var(--space-8);--page-pad-y:var(--space-7);
+  --state-hover:8%;--state-focus:12%;--state-pressed:16%;
+  --focus-width:2px;--focus-offset:2px;
+  --border-w:1px;
+  --z-sidebar:2;--z-toast:60;--z-dialog:70;
+  --spin:var(--on-accent);
+}
+
+/* -------------------------------------------------------------- 显式浅色 */
+:root[data-theme="light"] {
+  /* Tier 1 — reference palette (raw values, never used by components directly) */
+  --pal-neutral-0:#ffffff;--pal-neutral-50:#f7f7fc;--pal-neutral-100:#f4f4fa;
+  --pal-neutral-200:#e5e4f0;--pal-neutral-300:#d2d0e4;
+  --pal-neutral-500:#66647f;--pal-neutral-600:#63617c;--pal-neutral-900:#1f1e3a;
+  --pal-brand-50:#ecebfb;--pal-brand-500:#4f46c9;--pal-brand-700:#3f38ad;
+  --pal-green-50:#e4f4ea;--pal-green-700:#1b7350;
+  --pal-amber-50:#fdf2dc;--pal-amber-700:#855500;
+  --pal-red-50:#fdecea;--pal-red-700:#b23b2e;
+  --pal-blue-50:#e7eef8;--pal-blue-700:#2d5f9a;
+  --pal-night-950:#12102a;--pal-night-800:#24214a;
+  --pal-night-300:#b6b3d6;--pal-night-50:#f4f3ff;
+  --pal-black:#000000;
+
+  /* Tier 2 — system semantics (what components consume) */
+  --bg:#f4f4fa;--surface:#ffffff;--surface-2:#f7f7fc;
+  --text:#1f1e3a;--muted:#66647f;--faint:#63617c;
+  --line:#e5e4f0;--line-strong:#d2d0e4;
+  --accent:#4f46c9;--accent-hover:#3f38ad;--accent-soft:#ecebfb;--on-accent:#ffffff;
+  --ok:#1b7350;--ok-soft:#e4f4ea;
+  --warn:#855500;--warn-soft:#fdf2dc;
+  --bad:#b23b2e;--bad-soft:#fdecea;
+  --info:#2d5f9a;--info-soft:#e7eef8;
+  --side:#12102a;--side-text:#b6b3d6;--side-strong:#f4f3ff;--side-active:#24214a;
+  --overlay:#12102ab3;
+  --focus-ring:var(--accent);
+  --focus-ring-side:var(--side-strong);
+  --shadow:0 1px 2px #1a184010,0 4px 16px #1a184008;
+  --shadow-lg:0 24px 80px #12102a33;
+  color-scheme:light;
+
+  /* Tier 3 — component tokens (button height, card padding, radius, motion) */
+  --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  --fs-display:1.625rem;--fs-title:1.0625rem;--fs-body:0.875rem;
+  --fs-label:0.78125rem;--fs-meta:0.75rem;--fs-micro:0.65625rem;
+  --lh-tight:1.25;--lh-body:1.6;
+  --fw-regular:400;--fw-medium:500;--fw-semibold:600;--fw-bold:650;
+  --space-1:0.25rem;--space-2:0.5rem;--space-3:0.75rem;--space-4:1rem;
+  --space-5:1.25rem;--space-6:1.5rem;--space-7:2rem;--space-8:2.5rem;
+  --radius-sm:0.5rem;--radius-md:0.75rem;--radius-lg:1rem;--radius-pill:999rem;
+  --radius:var(--radius-md);
+  --tap-min:44px;--tap-min-compact:32px;
+  --motion-fast:120ms;--motion-base:200ms;--motion-slow:300ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+  --ease-emphasized:cubic-bezier(.2,0,0,1.2);
+  --card-pad:var(--space-6);--card-pad-compact:var(--space-4);
+  --btn-height:var(--tap-min-compact);--btn-pad-x:var(--space-4);
+  --field-height:var(--tap-min);
+  --sidebar-w:14.25rem;--sidebar-w-compact:12.25rem;--content-max:90rem;
+  --page-pad-x:var(--space-8);--page-pad-y:var(--space-7);
+  --state-hover:8%;--state-focus:12%;--state-pressed:16%;
+  --focus-width:2px;--focus-offset:2px;
+  --border-w:1px;
+  --z-sidebar:2;--z-toast:60;--z-dialog:70;
+  --spin:var(--on-accent);
+}
+
+/* -------------------------------------------------------------- 显式深色 */
+:root[data-theme="dark"] {
+  /* Tier 1 — reference palette (raw values, never used by components directly) */
+  --pal-neutral-0:#171631;--pal-neutral-50:#1c1b3a;--pal-neutral-100:#0f0e22;
+  --pal-neutral-200:#282649;--pal-neutral-300:#363460;
+  --pal-neutral-500:#a6a4c6;--pal-neutral-600:#9d9bc0;--pal-neutral-900:#e6e5f4;
+  --pal-brand-50:#26235a;--pal-brand-500:#9a90f8;--pal-brand-700:#a198f8;
+  --pal-green-50:#173327;--pal-green-700:#5cc98f;
+  --pal-amber-50:#352a12;--pal-amber-700:#e3b04e;
+  --pal-red-50:#3a1c18;--pal-red-700:#f07f71;
+  --pal-blue-50:#172a40;--pal-blue-700:#7fb0ea;
+  --pal-night-950:#0b0a1f;--pal-night-800:#1d1b44;
+  --pal-night-300:#9f9cc4;--pal-night-50:#f1f0ff;
+  --pal-black:#000000;
+
+  /* Tier 2 — system semantics (what components consume) */
+  --bg:#0f0e22;--surface:#171631;--surface-2:#1c1b3a;
+  --text:#e6e5f4;--muted:#a6a4c6;--faint:#9d9bc0;
+  --line:#282649;--line-strong:#363460;
+  --accent:#9a90f8;--accent-hover:#a198f8;--accent-soft:#26235a;--on-accent:#0b0a1f;
+  --ok:#5cc98f;--ok-soft:#173327;
+  --warn:#e3b04e;--warn-soft:#352a12;
+  --bad:#f07f71;--bad-soft:#3a1c18;
+  --info:#7fb0ea;--info-soft:#172a40;
+  --side:#0b0a1f;--side-text:#9f9cc4;--side-strong:#f1f0ff;--side-active:#1d1b44;
+  --overlay:#000000cc;
+  --focus-ring:var(--accent);
+  --focus-ring-side:var(--accent);
+  --shadow:0 1px 2px #00000066,0 4px 16px #00000040;
+  --shadow-lg:0 24px 80px #00000099;
+  color-scheme:dark;
+
+  /* Tier 3 — component tokens (button height, card padding, radius, motion) */
+  --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  --fs-display:1.625rem;--fs-title:1.0625rem;--fs-body:0.875rem;
+  --fs-label:0.78125rem;--fs-meta:0.75rem;--fs-micro:0.65625rem;
+  --lh-tight:1.25;--lh-body:1.6;
+  --fw-regular:400;--fw-medium:500;--fw-semibold:600;--fw-bold:650;
+  --space-1:0.25rem;--space-2:0.5rem;--space-3:0.75rem;--space-4:1rem;
+  --space-5:1.25rem;--space-6:1.5rem;--space-7:2rem;--space-8:2.5rem;
+  --radius-sm:0.5rem;--radius-md:0.75rem;--radius-lg:1rem;--radius-pill:999rem;
+  --radius:var(--radius-md);
+  --tap-min:44px;--tap-min-compact:32px;
+  --motion-fast:120ms;--motion-base:200ms;--motion-slow:300ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+  --ease-emphasized:cubic-bezier(.2,0,0,1.2);
+  --card-pad:var(--space-6);--card-pad-compact:var(--space-4);
+  --btn-height:var(--tap-min-compact);--btn-pad-x:var(--space-4);
+  --field-height:var(--tap-min);
+  --sidebar-w:14.25rem;--sidebar-w-compact:12.25rem;--content-max:90rem;
+  --page-pad-x:var(--space-8);--page-pad-y:var(--space-7);
+  --state-hover:8%;--state-focus:12%;--state-pressed:16%;
+  --focus-width:2px;--focus-offset:2px;
+  --border-w:1px;
+  --z-sidebar:2;--z-toast:60;--z-dialog:70;
+  --spin:var(--on-accent);
+}
+
+/* ------------------------------------------------- 系统深色（未强制浅色） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    /* Tier 1 — reference palette (raw values, never used by components directly) */
+    --pal-neutral-0:#171631;--pal-neutral-50:#1c1b3a;--pal-neutral-100:#0f0e22;
+    --pal-neutral-200:#282649;--pal-neutral-300:#363460;
+    --pal-neutral-500:#a6a4c6;--pal-neutral-600:#9d9bc0;--pal-neutral-900:#e6e5f4;
+    --pal-brand-50:#26235a;--pal-brand-500:#9a90f8;--pal-brand-700:#a198f8;
+    --pal-green-50:#173327;--pal-green-700:#5cc98f;
+    --pal-amber-50:#352a12;--pal-amber-700:#e3b04e;
+    --pal-red-50:#3a1c18;--pal-red-700:#f07f71;
+    --pal-blue-50:#172a40;--pal-blue-700:#7fb0ea;
+    --pal-night-950:#0b0a1f;--pal-night-800:#1d1b44;
+    --pal-night-300:#9f9cc4;--pal-night-50:#f1f0ff;
+    --pal-black:#000000;
+
+    /* Tier 2 — system semantics (what components consume) */
+    --bg:#0f0e22;--surface:#171631;--surface-2:#1c1b3a;
+    --text:#e6e5f4;--muted:#a6a4c6;--faint:#9d9bc0;
+    --line:#282649;--line-strong:#363460;
+    --accent:#9a90f8;--accent-hover:#a198f8;--accent-soft:#26235a;--on-accent:#0b0a1f;
+    --ok:#5cc98f;--ok-soft:#173327;
+    --warn:#e3b04e;--warn-soft:#352a12;
+    --bad:#f07f71;--bad-soft:#3a1c18;
+    --info:#7fb0ea;--info-soft:#172a40;
+    --side:#0b0a1f;--side-text:#9f9cc4;--side-strong:#f1f0ff;--side-active:#1d1b44;
+    --overlay:#000000cc;
+    --focus-ring:var(--accent);
+    --focus-ring-side:var(--accent);
+    --shadow:0 1px 2px #00000066,0 4px 16px #00000040;
+    --shadow-lg:0 24px 80px #00000099;
+    color-scheme:dark;
+
+    /* Tier 3 — component tokens (button height, card padding, radius, motion) */
+    --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    --font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+    --fs-display:1.625rem;--fs-title:1.0625rem;--fs-body:0.875rem;
+    --fs-label:0.78125rem;--fs-meta:0.75rem;--fs-micro:0.65625rem;
+    --lh-tight:1.25;--lh-body:1.6;
+    --fw-regular:400;--fw-medium:500;--fw-semibold:600;--fw-bold:650;
+    --space-1:0.25rem;--space-2:0.5rem;--space-3:0.75rem;--space-4:1rem;
+    --space-5:1.25rem;--space-6:1.5rem;--space-7:2rem;--space-8:2.5rem;
+    --radius-sm:0.5rem;--radius-md:0.75rem;--radius-lg:1rem;--radius-pill:999rem;
+    --radius:var(--radius-md);
+    --tap-min:44px;--tap-min-compact:32px;
+    --motion-fast:120ms;--motion-base:200ms;--motion-slow:300ms;
+    --ease-standard:cubic-bezier(.2,0,0,1);
+    --ease-emphasized:cubic-bezier(.2,0,0,1.2);
+    --card-pad:var(--space-6);--card-pad-compact:var(--space-4);
+    --btn-height:var(--tap-min-compact);--btn-pad-x:var(--space-4);
+    --field-height:var(--tap-min);
+    --sidebar-w:14.25rem;--sidebar-w-compact:12.25rem;--content-max:90rem;
+    --page-pad-x:var(--space-8);--page-pad-y:var(--space-7);
+    --state-hover:8%;--state-focus:12%;--state-pressed:16%;
+    --focus-width:2px;--focus-offset:2px;
+    --border-w:1px;
+    --z-sidebar:2;--z-toast:60;--z-dialog:70;
+  --spin:var(--on-accent);
+  }
+}
+
+/* ============================================================ 可访问性增强 */
+
+/* 更高对比度：线框更实，次级文字收敛到正文 */
+@media (prefers-contrast: more) {
+  :root {
+    --line:#b9b7d2;--line-strong:#8f8da8;
+    --muted:#3a3856;--faint:#2c2a48;
+  }
+  :root[data-theme="light"] {
+    --line:#b9b7d2;--line-strong:#8f8da8;
+    --muted:#3a3856;--faint:#2c2a48;
+  }
+  :root[data-theme="dark"] {
+    --line:#4a4778;--line-strong:#6b68a0;
+    --muted:#c9c7e2;--faint:#b9b7d8;
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --line:#4a4778;--line-strong:#6b68a0;
+    --muted:#c9c7e2;--faint:#b9b7d8;
+  }
+}
+
+/* 强制颜色模式：一律走系统色，不靠颜色传达状态 */
+@media (forced-colors: active) {
+  :root,
+  :root[data-theme="dark"],
+  :root[data-theme="light"],
+  :root:not([data-theme="light"]) {
+    --bg:Canvas;--surface:Canvas;--surface-2:Canvas;
+    --text:CanvasText;--muted:CanvasText;--faint:CanvasText;
+    --line:CanvasText;--line-strong:CanvasText;
+    --accent:Highlight;--accent-hover:Highlight;--accent-soft:Canvas;--on-accent:HighlightText;
+    --ok:CanvasText;--ok-soft:Canvas;
+    --warn:CanvasText;--warn-soft:Canvas;
+    --bad:CanvasText;--bad-soft:Canvas;
+    --info:CanvasText;--info-soft:Canvas;
+    --side:Canvas;--side-text:CanvasText;--side-strong:CanvasText;--side-active:Highlight;
+    --overlay:Canvas;
+    --focus-ring:Highlight;--focus-ring-side:Highlight;
+    --shadow:none;--shadow-lg:none;
+  }
+}

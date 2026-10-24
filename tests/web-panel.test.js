@@ -50,6 +50,19 @@ test('GPT default effort is submitted in scoped settings without losing the no-i
   await p.get('settings-form').events.submit({preventDefault(){}});
   assert.equal(p.calls[0].data.account,'second');assert.equal(p.calls[0].data.gpt_default_effort,'');
 });
+test('request body limit is submitted for the selected account and omitted for an older bridge', async () => {
+  const p = page(({ data }) => ({ ...data, saved: true }));
+  p.run("selected.account = 'second'; overview = async () => {};");
+  p.get('max-concurrency').value = '2'; p.get('kimi-concurrency').value = '1';
+  p.get('replay-buffer').value = '64';
+  await p.get('settings-form').events.submit({ preventDefault() {} });
+  assert.equal(p.calls[0].data.account, 'second');
+  assert.equal(p.calls[0].data.replay_buffer_mb, 64);
+  p.get('replay-buffer').disabled = true;
+  await p.get('settings-form').events.submit({ preventDefault() {} });
+  assert.equal('replay_buffer_mb' in p.calls[1].data, false);
+});
+
 test('usage polling reads only local usage, keeps stable tables and unsaved prices', async () => {
   const p = page(() => usageFixture());
   p.run("view = 'usage'"); p.get('usage-days').value = '7';

@@ -1,5 +1,15 @@
 # 用 Codex 接入 Mirasim GPT 模型
 
+## 模型测试通过，但实际对话报错
+
+简单的 `Reply only OK` 测试不带真实对话里的工具和历史，不能证明工具调用正常。2026-10-06 的兼容修复（尚未发布）补齐命名空间工具缺失的 `description`，同时保留 Responses Lite 的 `additional_tools` 及历史顺序。当前上游实测接受两种工具声明位置，不需要把 Lite 工具移动到顶层。
+
+上游有时会用 HTTP 200 的 SSE 返回参数错误，并把错误 JSON 排成多行、只在第一行加 `data:`。旧版会将其误报成 `Expected property name...` 或 `upstream_stream_invalid_json`。修复后，出流前的参数错误返回 400 与安全的参数路径；出流后的错误使用标准 SSE 错误事件。应修正对应字段，不要把参数错误当成账号失效反复重试。
+
+还要检查 sub2 的 GPT 上游账号是否**允许调度**、是否已绑定实际使用的分组，以及用户 Key 是否选择了同一个分组。后台单账号测试可以成功，但未入池或暂停的账号不会承接正常对话。若是手动暂停，请确认用途后再恢复；若桥接器持续自动暂停，应先检查账号健康状态和退避原因。
+
+本机实际通过桥接器验证了 `gpt-6-astra` 和 `gpt-6.1-sol` 的流式工具调用及第二轮结果续答。生产环境问题仍需以实际模型名、状态码和脱敏错误为准。
+
 ## 0.8.8 的 GPT 修复与排查
 
 升级至 0.8.8 后，桥接器会保留输出 Token 上限、自动上下文压缩设置、显式存储设置，以及推理/工具/压缩历史。旧版会删掉其中一部分参数，非流式聚合也可能漏掉终止快照以外的推理项。这些处理会影响会话连续性，已修复。
@@ -8,7 +18,7 @@
 
 “最近 GPT 请求”卡片会显示协议、发出的推理档及来源、上游报告的档位、输入条目数、输出上限和推理 Token。如果卡片显示 Messages，请检查下文 OpenAI 分组接法；桥接器无法恢复 sub2 在到达它之前已转换或丢弃的字段。这里也不能替客户端授予本机沙箱或审批权限。
 
-已实测 Mirasim 接受 `max_output_tokens`、`context_management` 和 `store:true`。它仍要求 Responses `stream:true` 与数组输入，桥接器保留这两项必要适配。`truncation:disabled` 以省略实现，`truncation:auto` 明确报错，避免静默改变上下文策略。Mirasim 本次测试拒绝 `ultra`，继续按现有兼容规则映射为 `max`；其他显式档位透传，可用性由上游模型决定。
+已实测 Mirasim 接受 `max_output_tokens`、`context_management` 和 `store:true`。它仍要求 Responses `stream:true` 与数组输入，桥接器保留这两项必要适配。`truncation:disabled` 以省略实现，`truncation:auto` 明确报错，避免静默改变上下文策略。`ultra` 自 roster `2026-10-24.v3` 起是真实推理档（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-5.6-sol`、`gpt-5.6-terra`），桥接器原样透传，不再映射为 `max`；`gpt-6-luna`、`gpt-5.6-luna` 只到 `max`，给它们发 `ultra` 由上游拒绝，桥接器不代为降级。其余显式档位同样透传，可用性由上游模型决定。
 
 建议用上游返回的 reasoning/compaction 项完整续传工具历史，不要只保留可见文本。[OpenAI 推理模型说明](https://developers.openai.com/api/docs/guides/reasoning)；自动压缩参数含义见 [OpenAI 上下文压缩说明](https://developers.openai.com/api/docs/guides/compaction)。Mirasim 是独立上游，不能据此推断它支持所有官方能力。
 

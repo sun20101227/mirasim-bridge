@@ -55,14 +55,41 @@ node scripts/export-credential.js --out private/relay-setting.json
 
 | 接口 | 用途 |
 |---|---|
-| `GET /v1/models` | 账号实时模型列表，按现有四系列白名单过滤 |
+| `GET /v1/models` | 账号实时模型列表，按白名单/黑名单过滤（默认不过滤，原样透传） |
 | `GET /v1/limits` | 原始额度窗口，保留 `model_scoped`；不触发推理 |
-| `GET /v1/model-roster` | 上游模型规格；无本地虚构的上下文窗口 |
+| `GET /v1/model-roster` | 上游模型规格、`served`/`withdrawn`、每模型 effort 档位与价格；无本地虚构的上下文窗口 |
 | `POST /v1/messages` | Claude、DeepSeek、Kimi；GPT 也保留此兼容入口，能力以上游为准 |
 | `POST /v1/responses` | GPT 原生 Responses；流式直传，非流式收集终止事件后返回 response JSON |
 | `POST /v1/responses/compact` | GPT 非流式上下文压缩，保留不透明 compaction 内容 |
 
-也支持 `/backend-api/codex/responses` 和 `/backend-api/codex/responses/compact` 别名。工具调用、usage、加密 reasoning/compaction 字段保留；Responses 不注入 Claude Code system 提示词。`ultra` effort 映射为 `max`，不实现上游客户端外围的多轮工作流。
+也支持 `/backend-api/codex/responses` 和 `/backend-api/codex/responses/compact` 别名。工具调用、usage、加密 reasoning/compaction 字段保留；Responses 不注入 Claude Code system 提示词。`ultra` effort 自 roster `2026-10-24.v3` 起是真实档位（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-5.6-sol`、`gpt-5.6-terra`；`gpt-6-luna`、`gpt-5.6-luna` 到 `max` 为止），桥接器原样透传，不再降级成 `max`；其他档位（含未知值）仍按原规则校验。桥接器不实现上游客户端外围的多轮工作流。
+
+## 上游拒绝的分类
+
+`/v1/models` 和推理请求可能返回 HTTP 429，原因不一定是凭证或服务故障：
+
+| 上游字段 | 含义 | 桥接器行为 |
+|---|---|---|
+| `type: credit_exhausted_shared`、`x-mirasim-error: mirasim-router:quota_exhausted`、`x-router-failure: quota; scope=account`、`x-should-retry: false` | 平台共享额度用尽（账号级，常见 `retry-after: 3600`） | 记入 `last_probe_failure`，账号保持注册但标为不健康，后台显示“共享额度用尽 · N分” |
+| 429 无上述字段 / `type: rate_limited` | 限流 | 按 `backoff.on_429_sec` 与 `Retry-After` 本地退避 |
+| 401 / 403 | 凭证被拒 | 作废票据并返回 503，不透传上游状态 |
+
+共享额度用尽期间 `/v1/model-roster` 仍返回 200，因此健康循环会用它确认 relay 与凭证存活，并把 roster 缓存 10 分钟；模型目录页在 `/v1/models` 失败时改用 roster 的可路由集合，而不是整页报错。
+
+## 模型清单（`/v1/model-roster`）
+
+roster `2026-10-24.v3` 的结构：
+
+| 字段 | 用途 |
+|---|---|
+| `served` | 当前可路由的模型 ID（示例快照 24 个） |
+| `withdrawn` | 已下架 ID（如 `claude-sonnet-5`、`claude-fable-5`、`claude-haiku-4-5`、`claude-opus-4-8`），请求会被拒绝 |
+| `agents` | 各 CLI 的模型列表（`claude`/`codex`/`dsh`/`kimi`），与 `served` 不是同一集合 |
+| `models` | 每模型 `effort` 档位、`pricing`、`quotaFactor`、`contextWindow`/`maxOutput`、`inputModalities` |
+| `cli` | 各 CLI 的最低客户端版本（如 `codex: 0.159.3`） |
+| `version` | roster 版本串，用于确认清单是否为最新 |
+
+桥接器只读取上表字段，未知字段丢弃。`contextWindow` 等上下文规格始终来自上游，不使用本地虚构值。
 
 普通 Responses 会转换字符串 input、设置 store=false、请求 encrypted reasoning，并移除 Codex 不接受的 max_output_tokens/max_completion_tokens、采样参数等字段；**不能用这些输出上限字段限制该路径的输出预算**。compact 不做这些清洗，保留其非流式输入输出。
 

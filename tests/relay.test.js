@@ -38,7 +38,7 @@ test('Responses normalization/aggregation preserves tool and opaque items and de
   const opaque = { type: 'compaction', encrypted_content: 'opaque-history' };
   const normal = normalizeResponses({ model: 'gpt-test', input: [opaque], stream: false, reasoning: { effort: 'ultra' } });
   assert.equal(normal.body.stream, true); assert.equal(normal.downstreamStream, false);
-  assert.equal(normal.body.reasoning.effort, 'max'); assert.deepEqual(normal.body.input, [opaque]);
+  assert.equal(normal.body.reasoning.effort, 'ultra'); assert.deepEqual(normal.body.input, [opaque]);
   const compact = normalizeResponses({ model: 'gpt-test', input: [opaque] }, { compact: true });
   assert.ok(!('stream' in compact.body));
   const normalized = normalizeResponses({ model: 'gpt-test', input: 'hello', max_output_tokens: 512, temperature: 0.1 });
@@ -172,7 +172,9 @@ test('direct relay lifecycle, control signing, sealed inference and bridge route
     });
     await t.test('unsupported route/method, blocked model and invalid JSON stay local', async () => {
       const before = calls.length;
-      assert.equal((await bridge.diagnosticRequest(target, '/v1/chat/completions', { model: 'gpt-test' })).status, 400);
+      // /v1/chat/completions is a real relay route now; an unsupported one must still
+      // be refused before any upstream call (no inference, no credential burn).
+      assert.equal((await bridge.diagnosticRequest(target, '/v1/embeddings', { model: 'gpt-test' })).status, 400);
       assert.equal((await bridge.diagnosticRequest(target, '/v1/responses')).status, 400);
       assert.equal((await bridge.diagnosticRequest(target, '/v1/responses', { model: 'gpt-fable' })).status, 400);
       assert.equal((await bridge.diagnosticRequest(target, '/v1/responses', [])).status, 400);

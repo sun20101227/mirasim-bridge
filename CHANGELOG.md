@@ -1,5 +1,38 @@
 # 变更记录
 
+## 0.9.0 — 2026-10-24（本地升级包，未发布）
+- **控制台重写**：新增 `web/tokens.css` 三层设计令牌（浅色 / 深色 / 跟随系统、`prefers-contrast`、`forced-colors`）；正文与次要文字对比度全部 ≥ 4.5:1（原次要文字 2.73–3.21:1）；`style.css` 392 处 px 改为 rem 令牌，浏览器缩放与系统字号生效；按钮最小命中区 44px。
+- 语义与可访问性：跳转链接、landmark、表格 `caption` + `scope`、每控件 label 关联、`aria-invalid` 与字段级错误、进度条 `role`、`aria-live` 播报、`aria-current` 导航。
+- 7 处阻塞 `confirm()` 换成页内对话框（焦点陷阱、Esc、恢复焦点）；**回退版本需手输「回退」二字**。暂停调度改为可撤销提示。
+- 深链路由 `#/overview` 等，刷新与浏览器后退可回到原页；切页焦点移到标题。新增命令面板（`Ctrl/⌘+K`）、`/` 聚焦搜索、`g`+字母跳转、`?` 快捷键帮助。
+- 卡片四态（加载/空/失败可重试/数据过期）；轮询失败退避 15→30→60 秒并显示数据新鲜度。
+- 静态资源 `ETag` + `304` + gzip：`app.js` 107 KB → 33 KB 传输，轮询只回 304。
+- **协议**：放通 `POST /v1/chat/completions`（实测真实路由，原样转发，不做协议转换）；`[1m]` 模型后缀改为透传（官方客户端默认就发 `claude-opus-5-5[1m]`），仅在白名单/黑名单匹配时剥除；`relayAgent` 扩展到 gemini/grok/qwen。
+- **roster**：`agents` 完整解析 `label`/`contextWindow`/`maxOutput`/`autoCompactRatio`/`adaptive`/`default`/`effort`；新增 `modelInfo()` 合并视图与 `[1m]` 归一；新增 `pricing_usd` 归一化键名。
+- 推理档：`off`（deepseek/dsh）纳入合法档位；新增 `constraints.adaptive_effort`（默认 **关闭**）与 `adaptive_default_effort`，开启后对 `adaptive` 模型发送 `thinking.type=adaptive` + `output_config.effort`。
+- 模型页显示额度系数、上下文、最大输出、自动压缩、adaptive、上游单价，以及「已下架/未路由」计数与 roster 来源；支持排序与目录 JSON 导出。
+- **登录失效可重新登录**：刷新令牌被永久拒绝（4xx / `invalid_grant` 等）时标记 `reauth_required` 并跳过冷却；账号页新增「登录状态」卡片，可为该账号重新授权，**只替换凭证文件**，账号名/分组/并发不变，旧凭证留作 `setting.previous.json`，新凭证原子写入并热加载，无需重启。429/5xx 仍按临时失败退避。
+- 宿主部署工具（`deploy-agent.py`、`install-panel.py`）文件清单同步新增的三个 web 资源，避免升级后宿主机后台 404。
+- 验证：234 项 Node 回归、58 项 Python 测试、68 项自测通过。新增四类门禁长期生效：`design-tokens`（对比度/主题对齐）、`a11y-static`（结构/label/禁止阻塞对话框）、`panel-assets`（资源存在/304/gzip）、`reauth`（永久拒绝 vs 临时失败）。详见 [UPGRADE-0.9.0.md](UPGRADE-0.9.0.md)。
+- 未验证：`adaptive_effort` 的线上线格式与 `/v1/chat/completions` 的真实推理响应——账号共享额度用尽，所有推理请求在请求体校验前即返回 429。真实浏览器与屏幕阅读器的人工走查也尚未进行。
+
+## 0.8.10 — 2026-10-24（本地升级包，未发布）
+- 请求体默认上限从 8 MB 提高到 64 MB，适应较长工具历史和图片请求；已有显式配置保持原值。
+- 后台“账号管理 → 运行设置”新增请求体上限（1–1024 MB），保存后对该账号的新请求立即生效；修复托管账号实际使用主账号上限的问题。
+- 真正超限时返回 HTTP 413 / `request_too_large` 并给出调整建议，不再误报 503“上游不可用”。
+- 对齐 roster `2026-10-24.v3`：`ultra` 是真实推理档（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-5.6-sol`、`gpt-5.6-terra`），`reasoning.effort` 原样透传，不再静默降级为 `max`；后台 GPT 默认推理档同步支持 `ultra`。
+- 新增 `lib/roster.js` 解析 `/v1/model-roster`：`served` / `withdrawn` / `agents` / 每模型 `effort`、`pricing`、`quotaFactor`、`contextWindow`、`maxOutput`、`inputModalities` / `cli.minVersion` / `version`，未知字段丢弃，缓存 10 分钟。模型目录页显示档位与上下文规格；`/v1/models` 失败时改用 roster 的可路由集合，不再整页报错。
+- 区分上游 429 的三种成因：共享额度用尽（`credit_exhausted_shared` / `x-mirasim-error: mirasim-router:quota_exhausted` / `x-router-failure: quota; scope=account`）、限流、凭证被拒。额度用尽不再被报成“上游不可用”，账号保持注册但标为不健康，后台显示“共享额度用尽 · N分”并保留 `retry-after`；健康循环在此时用 roster 确认 relay 与凭证存活。诊断导出新增只含枚举值的 `relay` 块，不导出上游自由文本。
+- 实测确认控制接口 `/v1/models`、`/v1/limits`、`/v1/model-roster` 不校验请求签名，`/v1/device/session` 校验；桥接器现有签名规范被接受，`x-mirasim-client` 取值不被校验，因此 `relay.client_version` 保持不变，未改用新版桌面客户端的 NUL 连接签名规范（实测被当前 relay 拒绝）。
+- 本地包包含下方 2026-10-06 的已有 GPT 兼容修复。升级步骤见 [UPGRADE-0.8.10.md](UPGRADE-0.8.10.md)。
+- 验证：200 项 Node 回归、58 项 Python 测试、67 项自测通过；本地 mock 上游验证超过 8 MB 的 Messages、Responses、compact 请求完整转发，以及定长/分块上传的字节边界、旧配置、按账号隔离和运行中调整；另用 mock relay 复现 `/v1/models` 429 共享额度用尽而 roster 仍 200 的组合，验证分类、缓存、健康循环与面板回退。对 `relay.mirasim.ai` 的真实调用确认 roster 内容、签名接受性与 429 分类。未验证真实服务器或上游的大请求上限，也未在额度恢复后重测推理。
+
+## 未发布 — 2026-10-06
+- 修复 GPT 命名空间工具缺少 `description` 时被当前 Mirasim 上游拒绝的问题：只补齐缺失的空描述，兼容顶层工具与 Responses Lite 的 `additional_tools`，保留工具定义、多轮历史、模型名和推理档。
+- 修复上游将参数错误放在 HTTP 200 SSE 中、且只有首行带 `data:` 时，被误报为 JSON 解析失败或通用 503 的问题。流式和非流式使用相同解析规则；参数错误在出流前返回 400，出流后发送标准错误事件，不重试推理、不伪造成功结束。
+- 只返回允许的错误类别和参数路径，不回显上游原始消息或会话状态。非流式失败也记录到最近流错误诊断中。
+- 真实桥接器验证：`gpt-6-astra`、`gpt-6.1-sol` 均通过带命名空间工具的流式两轮调用与结果续答；这不代表已验证生产 sub2 分组或已更新服务器。
+
 ## 0.8.9 — 2026-09-27
 - 网页新增可用的邮箱验证码登录：发送 `/auth/code` 后输入验证码，最多重试 5 次；邮箱选项不再被禁用。上游发送验证码接口实测 HTTP 200，完整验证码校验仍需要用户收到的邮箱验证码。
 - 新增“导入 JSON 凭证”：支持 Mirasim portable `access_token` / `refresh_token` / `device_private_key` 格式，也支持旧版 `auth.token` / `auth.refreshToken` / `device.privateKey` 格式。导入前通过 `/auth/me` 验证，保存时只保留必要凭证和过期时间，丢弃邮箱、套餐、admin_url、管理密钥等元数据。

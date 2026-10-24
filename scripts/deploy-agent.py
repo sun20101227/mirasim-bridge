@@ -22,6 +22,7 @@ HOST_DIR = Path('/opt/mirasim-deploy')
 # image passed version + selftest checks, so one web click upgrades containers AND this service.
 HOST_FILES = {'deploy-agent.py': '/app/scripts/deploy-agent.py', 'panel-host.py': '/app/scripts/panel-host.py',
               'web/index.html': '/app/web/index.html', 'web/app.js': '/app/web/app.js', 'web/style.css': '/app/web/style.css',
+              'web/tokens.css': '/app/web/tokens.css', 'web/modal.js': '/app/web/modal.js', 'web/undo.js': '/app/web/undo.js',
               'web/icon.png': '/app/web/icon.png'}
 SERVICE_FILES = ('deploy-agent.py', 'panel-host.py')
 

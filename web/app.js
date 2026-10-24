@@ -1,6 +1,14 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 const host = document.body.dataset.mode === 'host';
+// ---- environment guards ----------------------------------------------------
+// app.js is also evaluated inside a headless vm (tests/web-panel.test.js) whose
+// document has no documentElement, no location, no history and no localStorage.
+// Every browser-only API is reached through these so a missing one degrades
+// instead of throwing while the module is still initialising.
+const win = typeof window !== 'undefined' ? window : null;
+const root = typeof document !== 'undefined' ? document.documentElement || null : null;
+const store = (() => { try { return win && win.localStorage ? win.localStorage : null; } catch { return null; } })();
 let key = '', loginSession = null, timer = null, polling = false, noticeTimer = null, view = 'overview';
 let selected = { target: 'main', account: 'main' };
 let fleetRows = [], bridgeVersion = null, modelRows = [], modelsFor = '', groupsCache = null;
@@ -19,10 +27,14 @@ let fleetLoadedAt = null, batchCheck = null;
 let usageData = null, usageFor = '';
 const PRICE_FIELDS = { input: 'price-input', output: 'price-output', cache_read: 'price-cache-read', cache_write: 'price-cache-write' };
 const FLAG_LABELS = { unavailable: '状态读取失败', expired: '会员已到期', expiring: '会员三天内到期', low_quota: '账号额度不超过 10%',
-  cooldown: '上游退避中', unreachable: 'sub2 反向未通', upstream: '上游未就绪', membership_unknown: '会员状态未知' };
+  cooldown: '上游退避中', unreachable: 'sub2 反向未通', upstream: '上游未就绪', membership_unknown: '会员状态未知',
+  reauth: '登录失效，需要重新登录' };
 function accountFlags(row, now = Date.now()) {
   if (row.error) return ['unavailable'];
   const a = row.summary || {}, m = a.membership, q = a.quota, flags = [];
+  // A dead refresh token outranks every other diagnosis: no amount of waiting,
+  // quota or reachability work will help until the account signs in again.
+  if (a.needs_reauth || a.relay?.needs_reauth) flags.push('reauth');
   if (m?.available && !m.stale) {
     const expiry = Date.parse(m.expires_at);
     if (Number.isFinite(expiry)) { if (expiry <= now) flags.push('expired'); else if (expiry - now <= 3 * 86400000) flags.push('expiring'); }
@@ -51,6 +63,20 @@ function filterAccounts(rows, query = '', filter = 'all', order = 'default') {
   return result;
 }
 function visibleAccounts() { return filterAccounts(fleetRows, $('account-search').value, $('account-filter').value, $('account-sort').value); }
+/** Sort key for the model table: id | family | state | latency | effort | quota. */
+function sortModels(rows, order = 'default') {
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : Infinity);
+  const state = (m) => (m.enabled ? 0 : m.blocked || m.filtered ? 2 : 1);
+  const result = rows.slice();
+  const byId = (a, b) => a.id.localeCompare(b.id);
+  if (order === 'id') result.sort(byId);
+  else if (order === 'state') result.sort((a, b) => state(a) - state(b) || byId(a, b));
+  else if (order === 'latency') result.sort((a, b) => num(a.latency?.total_p50_ms) - num(b.latency?.total_p50_ms) || byId(a, b));
+  else if (order === 'effort') result.sort((a, b) => (b.effort?.length || 0) - (a.effort?.length || 0) || byId(a, b));
+  else if (order === 'context') result.sort((a, b) => (b.context_window || 0) - (a.context_window || 0) || byId(a, b));
+  else if (order === 'quota') result.sort((a, b) => num(a.quota_factor) - num(b.quota_factor) || byId(a, b));
+  return result;
+}
 function filterModels(rows, query = '', filter = 'all', family = '', scope = selected) {
   const wanted = query.trim().toLocaleLowerCase();
   return rows.filter(m => {
@@ -75,6 +101,12 @@ function diagnosticReport(now = Date.now()) {
         quota: { available: Boolean(q.available), stale: Boolean(q.stale), observed_at: date(q.observed_at), unmetered: Boolean(q.unmetered),
           windows: (q.windows || []).filter(w => ['5h','7d','7d_claude','7d_fable'].includes(w.name)).map(w => ({ name: w.name, remaining_percent: number(w.remaining_percent), reset_at: date(w.reset_at), model_scoped: Boolean(w.model_scoped) })) },
         counters: Object.fromEntries(['total','ok','err','rejected','fallback'].map(k => [k, number(a.counters?.[k])])),
+        relay: { ready: a.relay?.ready === true,
+          // Only the relay's machine-classified failure kind is exported — never the
+          // free-form upstream message, which can echo account or session state.
+          probe_kind: ['quota','rate_limit','auth','server','error'].includes(a.last_probe_failure?.kind) ? a.last_probe_failure.kind : null,
+          probe_status: number(a.last_probe_failure?.status), retry_after_sec: number(a.last_probe_failure?.retry_after_sec),
+          roster_version: typeof a.roster?.version === 'string' ? a.roster.version.slice(0, 64) : null },
         connection: result ? { checked_at: date(result.checked_at), bridge_ok: result.bridge?.ok === true, sub2_ok: typeof result.sub2api?.ok === 'boolean' ? result.sub2api.ok : null,
           status: number(result.bridge?.status), elapsed_ms: number(result.bridge?.elapsed_ms), model_count: number(result.bridge?.model_count) } : null };
     }) };
@@ -93,6 +125,70 @@ function renderChanged(id, value, draw) {
 function markRefreshed() {
   $('refreshed').hidden = false; $('refreshed').textContent = '自动同步于 ' + new Date().toLocaleTimeString();
 }
+/**
+ * Field-level error association. A global notice is not enough for a form: a
+ * screen reader has no idea which control failed. setFieldError marks the input
+ * aria-invalid, points it at a described-by message, and returns a cleanup so the
+ * next successful submit clears the previous mark. Errors never replace the
+ * field's own label — they are additive.
+ */
+const fieldErrors = new Map();
+function setFieldError(id, message) {
+  const field = $(id);
+  if (!field) return;
+  const holder = field.closest ? field.closest('label') : null;
+  let row = fieldErrors.get(id);
+  if (!row) {
+    const text = node('span', '', 'field-error');
+    text.id = id + '-error';
+    text.setAttribute('role', 'alert');
+    if (holder && holder.append) holder.append(text);
+    else if (field.parentNode && field.parentNode.append) field.parentNode.append(text);
+    row = { text, field };
+    fieldErrors.set(id, row);
+  }
+  row.text.textContent = message || '';
+  if (message) {
+    field.setAttribute('aria-invalid', 'true');
+    field.setAttribute('aria-describedby', [field.getAttribute?.('aria-describedby'), row.text.id].filter(Boolean).join(' '));
+  } else {
+    field.removeAttribute('aria-invalid');
+    row.text.textContent = '';
+  }
+}
+function clearFieldErrors() {
+  for (const [id] of fieldErrors) setFieldError(id, '');
+}
+/** Mark a field by name and scroll it into view — used when validation fails. */
+function rejectField(id, message) {
+  setFieldError(id, message);
+  const field = $(id);
+  if (field && typeof field.focus === 'function') { try { field.focus({ preventScroll: false }); } catch { field.focus(); } }
+  return Error(message);
+}
+/**
+ * Card-level state so a failed read is visible where it happened, with a retry,
+ * instead of only as a transient banner at the top of the page. `stale` means the
+ * previous data is still on screen but is no longer live.
+ */
+function cardState(element, state, { message, retry } = {}) {
+  if (!element) return;
+  if (element.dataset) element.dataset.state = state || '';
+  let banner = element.querySelector ? element.querySelector('[data-role="card-state"]') : null;
+  if (state !== 'error' && state !== 'stale') { if (banner && banner.remove) banner.remove(); return; }
+  if (!banner) {
+    banner = node('div', '', 'card-state-banner');
+    if (banner.dataset) banner.dataset.role = 'card-state';
+    if (element.prepend) element.prepend(banner); else if (element.append) element.append(banner);
+  }
+  banner.replaceChildren();
+  banner.append(node('span', message || (state === 'error' ? '读取失败' : '数据可能已过期')));
+  if (retry) {
+    const button = node('button', '重试', 'quiet small'); button.type = 'button';
+    button.addEventListener('click', guarded(retry));
+    banner.append(button);
+  }
+}
 function formWritable(id, scope = selected) {
   return dirtyForms.get(id) !== identity(scope) && document.activeElement?.form !== $(id);
 }
@@ -100,6 +196,40 @@ for (const id of ['settings-form', 'codex-form', 'keeper-form', 'pricing-form'])
   for (const event of ['input', 'change']) $(id).addEventListener(event, () => dirtyForms.set(id, identity()));
 }
 const titles = { overview: '运行概览', accounts: '账号管理', models: '模型目录', usage: '用量统计', logs: '运行日志', release: '版本与升级' };
+const VIEWS = Object.keys(titles);
+
+// ---- theme -----------------------------------------------------------------
+// Three-state switcher (system / light / dark). The CSS already defined both
+// palettes but nothing ever wrote data-theme, so the switch was dead code.
+const THEME_KEY = 'mirasim-theme';
+function themeChoice() { const v = store ? store.getItem(THEME_KEY) : null; return ['light', 'dark'].includes(v) ? v : 'system'; }
+function applyTheme(choice) {
+  if (root && root.dataset) { if (choice === 'system') delete root.dataset.theme; else root.dataset.theme = choice; }
+  for (const btn of document.querySelectorAll('[data-theme-choice]') || []) {
+    const on = btn.dataset.themeChoice === choice;
+    if (btn.setAttribute) btn.setAttribute('aria-pressed', String(on));
+    if (btn.classList && btn.classList.toggle) btn.classList.toggle('selected', on);
+  }
+}
+function setTheme(choice) {
+  if (!['system', 'light', 'dark'].includes(choice)) return;
+  try { if (store) { if (choice === 'system') store.removeItem(THEME_KEY); else store.setItem(THEME_KEY, choice); } } catch { /* private mode */ }
+  applyTheme(choice);
+}
+
+// ---- routing ---------------------------------------------------------------
+// Views were pure in-memory state: reload always dropped you on overview and the
+// back button did nothing. The hash is now the source of truth.
+const viewFromHash = () => { const h = String((win && win.location ? win.location.hash : '') || '').replace(/^#\/?/, ''); return VIEWS.includes(h) ? h : 'overview'; };
+let suppressHash = false;
+function syncHash(next) {
+  if (!win || !win.location || !win.history || !win.history.replaceState) return;
+  const want = '#/' + next;
+  if (win.location.hash === want) return;
+  try { suppressHash = true; win.history.replaceState(null, '', want); } catch { /* file:// */ }
+  setTimeout(() => { suppressHash = false; }, 0);
+}
+
 const KNOWN = ['claude', 'gpt', 'deepseek', 'kimi'];
 const FAMILY_NAMES = { claude: 'Claude', gpt: 'GPT', deepseek: 'DeepSeek', kimi: 'Kimi', glm: 'GLM', other: '其他' };
 const familyName = (f) => FAMILY_NAMES[f] || (f ? f.charAt(0).toUpperCase() + f.slice(1) : '其他');
@@ -161,6 +291,27 @@ function guarded(fn) {
   };
 }
 function stat(id, value, tone) { $(id).querySelector('strong').textContent = value; if (tone) $(id).dataset.tone = tone; else delete $(id).dataset.tone; }
+/**
+ * Blocking dialogs froze the 15 s poll, could not be styled, and could not be
+ * driven predictably by keyboard-only users. MiraModal replaces them with an
+ * in-page dialog that keeps focus, traps Tab and never auto-confirms.
+ *
+ * There is deliberately NO window.confirm fallback: a native dialog would block
+ * the poll loop again, and silently cancelling is worse than saying so. If the
+ * component failed to load the action refuses and tells the operator why.
+ */
+async function ask({ title, message = '', confirmLabel = '确定', cancelLabel = '取消', tone = 'default', requireTyped }) {
+  if (!win || !win.MiraModal || typeof win.MiraModal.confirm !== 'function') {
+    notice('确认对话框组件未加载，操作已取消。请刷新页面后重试。', true);
+    return false;
+  }
+  return win.MiraModal.confirm({ title, message, confirmLabel, cancelLabel, tone, requireTyped });
+}
+/** Undoable action feedback; degrades to a plain notice without the component. */
+function undoable(text, onUndo, undoLabel = '撤销') {
+  if (win && win.MiraToast && typeof win.MiraToast.undo === 'function') return win.MiraToast.undo({ text, onUndo, undoLabel });
+  notice(text);
+}
 function hideAccess() {
   clearTimeout(accessHideTimer); accessFor = '';
   $('access-key').value = ''; $('access-key').type = 'password'; $('access-base').value = ''; $('access-info').hidden = true;
@@ -318,7 +469,15 @@ async function fleet() {
     else {
       const [text, tone] = SCHED[a.sub2api?.schedulable] || SCHED.unknown; state.append(pill(a.hold ? '手动暂停' : text, a.hold ? 'warn' : tone));
       if (a.sub2api?.managed && !a.sub2api.reachable) state.append(pill('反向未通', 'warn'));
-      if (a.relay && a.relay.ready === false) state.append(pill('上游未就绪', 'bad'));
+      if (a.relay && a.relay.ready === false) {
+        // The relay names the reason in machine fields; "quota" means the account's
+        // shared pool is spent (retry-after), not that the credential is dead.
+        const failure = a.last_probe_failure;
+        const quota = failure?.kind === 'quota';
+        state.append(pill(quota ? (failure.retry_after_sec ? `共享额度用尽 · ${Math.round(failure.retry_after_sec / 60)}分` : '共享额度用尽') : '上游未就绪', quota ? 'warn' : 'bad'));
+      }
+      if (a.needs_reauth) state.append(pill('需要重新登录', 'bad'));
+      if (a.needs_reauth) state.append(pill('需要重新登录', 'bad'));
       if (a.sub2api_codex?.managed) state.append(pill(`Codex ${SCHED[a.sub2api_codex.schedulable]?.[0] || '等待'}`, a.sub2api_codex.schedulable === 'on' ? 'info' : ''));
     }
     const load = node('div', '', 'fleet-load'); const c = a.counters || {};
@@ -479,6 +638,8 @@ async function overview() {
   if (formWritable('settings-form', read.scope)) {
     if (s.max_concurrency) $('max-concurrency').value = s.max_concurrency;
     if (s.kimi_max_concurrency) $('kimi-concurrency').value = s.kimi_max_concurrency;
+    $('replay-buffer').value = s.replay_buffer_mb ?? '';
+    $('replay-buffer').disabled = s.replay_buffer_mb === undefined;
     if (s.model_fallback) $('model-fallback').value = s.model_fallback;
     if (s.kimi_default_effort !== undefined) $('kimi-effort').value = s.kimi_default_effort;
     if (s.gpt_default_effort !== undefined) $('gpt-effort').value = s.gpt_default_effort;
@@ -523,8 +684,80 @@ async function overview() {
   markRefreshed();
 }
 
-async function codexCard() {
-  const read = beginRead('codex');
+// ---- re-login --------------------------------------------------------------
+// A refresh token refused permanently (revoked / rotated elsewhere / expired)
+// cannot be waited out. The panel reports the state; this drives the replacement
+// sign-in, which rewrites only the credential file.
+let reauthSession = null, reauthFor = '';
+function renderReauth(state) {
+  const box = $('reauth-state'); if (!box) return;
+  box.replaceChildren();
+  if (!state) { box.append(node('strong', '尚未检查'), node('span', '打开账号页时会读取一次当前账号的登录状态。')); return; }
+  if (state.needs_reauth) {
+    box.dataset.tone = 'bad';
+    box.append(node('strong', '登录已失效，需要重新登录'),
+      node('span', `上游拒绝刷新凭证（${state.reason || '原因未提供'}）${state.since ? ' · ' + relative(Date.parse(state.since)) : ''}。这一状态不会自行恢复。`));
+  } else {
+    box.dataset.tone = 'ok';
+    box.append(node('strong', '登录状态正常'),
+      node('span', state.credential_saved === false ? '但凭证文件缺失，建议重新登录或导入。' : '刷新凭证仍可用；额度不足或限流不属于登录失效。'));
+  }
+  if ($('reauth-actions')) $('reauth-actions').hidden = !state.needs_reauth;
+}
+async function reauthState() {
+  const scope = { ...selected };
+  try {
+    const state = await api('reauth', scoped({}, scope), scope.target);
+    if (!sameAccount(scope)) return null;
+    reauthFor = identity(scope); renderReauth(state); return state;
+  } catch (err) {
+    if (sameAccount(scope)) {
+      reauthFor = identity(scope);
+      const box = $('reauth-state');
+      if (box) { box.dataset.tone = 'warn'; box.replaceChildren(node('strong', '无法读取登录状态'), node('span', err.message)); }
+    }
+    return null;
+  }
+}
+function reauthMessage(text) { const el = $('reauth-message'); if (el) el.textContent = text || ''; }
+async function startReauth() {
+  const scope = { ...selected };
+  // The panel identifies the account by profile; 'main' is this bridge's own.
+  const profile = scope.account;
+  reauthMessage('正在发起授权…');
+  const r = await api('login/start', { profile, provider: 'google', renew: true }, scope.target);
+  if (!sameAccount(scope)) return;
+  reauthSession = { id: r.id, target: scope.target, profile };
+  if ($('reauth-box')) $('reauth-box').hidden = false;
+  if ($('reauth-actions')) { $('reauth-actions').hidden = false; }
+  if ($('reauth-cancel')) $('reauth-cancel').hidden = false;
+  const link = $('reauth-link');
+  if (link) {
+    if (r.url) { link.href = r.url; link.hidden = false; } else link.hidden = true;
+  }
+  if ($('reauth-prompt')) $('reauth-prompt').firstChild && ($('reauth-prompt').firstChild.textContent = r.provider === 'email' ? '把邮件里的验证码填到这里' : '把授权后跳转的完整地址粘贴到这里');
+  reauthMessage('等待授权回调，请在同一次登录里完成。');
+}
+async function finishReauth(r) {
+  reauthSession = null;
+  if ($('reauth-box')) $('reauth-box').hidden = true;
+  if ($('reauth-cancel')) $('reauth-cancel').hidden = true;
+  reauthMessage('');
+  notice(r.saved ? `${label(selected)} 已重新登录，新凭证已生效，无需重启。` : '重新登录未完成。');
+  await refresh();
+}
+async function queryReauth() {
+  if (!reauthSession) return;
+  const session = reauthSession;
+  const r = await api('login/status', { id: session.id }, session.target).catch((e) => ({ stage: 'error', message: e.message }));
+  if (reauthSession !== session) return;
+  if (r.stage === 'saved') return finishReauth(r);
+  if (r.stage === 'failed') { reauthSession = null; reauthMessage('重新登录未完成，旧凭证未被修改。可重新发起。'); return; }
+  if (r.stage === 'error') { reauthMessage(`查询失败：${r.message}`); return; }
+  reauthMessage(r.stage === 'waiting' ? '等待授权回调。' : '正在校验并保存新凭证…');
+}
+
+async function codexCard() {  const read = beginRead('codex');
   let cx;
   try { cx = await api('codex', scoped({}, read.scope), read.scope.target); } catch { if (read.valid()) $('codex-card').hidden = true; return; }
   if (!read.valid()) return;
@@ -559,7 +792,7 @@ async function profiles() {
     const actions = node('div', '', 'row');
     if (p.configured && p.hosted) {
       const b = node('button', '移出托管', 'quiet small');
-      b.addEventListener('click', guarded(async () => { if (!confirm(`把 ${p.profile} 移出托管？sub2 账号会暂停但保留，凭证不删除。`)) return; const r = await api('account/unhost', { profile: p.profile }, 'main'); notice(r.note || '已移出托管'); await refresh(); }));
+      b.addEventListener('click', guarded(async () => { if (!await ask({ title: `把 ${p.profile} 移出托管？`, message: 'sub2 账号会暂停但保留，凭证不删除。', confirmLabel: '移出托管', tone: 'danger' })) return; const r = await api('account/unhost', { profile: p.profile }, 'main'); notice(r.note || '已移出托管'); await refresh(); }));
       actions.append(b);
     } else if (p.configured && !managedContainer) {
       if (hostingSupported) {
@@ -569,7 +802,7 @@ async function profiles() {
       }
       if (host) {
         const b = node('button', '独立容器', 'quiet small');
-        b.addEventListener('click', guarded(async () => { if (!confirm(`为 ${p.profile} 启动独立容器？只有需要与主 bridge 隔离时才建议这样做。`)) return; await api('attach', { profile: p.profile }); notice('容器已启动，账号会自动注册。'); await refresh(); }));
+        b.addEventListener('click', guarded(async () => { if (!await ask({ title: `为 ${p.profile} 启动独立容器？`, message: '只有需要与主 bridge 隔离时才建议这样做。', confirmLabel: '启动容器' })) return; await api('attach', { profile: p.profile }); notice('容器已启动，账号会自动注册。'); await refresh(); }));
         actions.append(b);
       }
     }
@@ -588,7 +821,7 @@ function renderFamilies() {
     text.append(node('b', familyName(family)), node('span', `已启用 ${on} / ${rows.length}`));
     const enable = on < rows.length, button = node('button', enable ? '全部启用' : '全部停用', enable ? 'secondary small' : 'danger small');
     button.addEventListener('click', guarded(async () => {
-      if (!confirm(`${enable ? '启用' : '停用'} ${familyName(family)} 系列的全部模型？`)) return;
+      if (!await ask({ title: `${enable ? '启用' : '停用'} ${familyName(family)} 系列的全部模型？`, message: '保存后下一次健康检查同步到 sub2。', confirmLabel: enable ? '启用' : '停用', tone: enable ? 'default' : 'danger' })) return;
       const r = await api('models/family', scoped({ family, enabled: enable }, scope), scope.target); notice(`已${enable ? '启用' : '停用'} ${r.changed} 个 ${familyName(family)} 模型，sub2 映射将在下一次健康检查同步。`); if (sameAccount(scope)) await models();
     }));
     box.append(text, button); $('families').append(box);
@@ -605,7 +838,26 @@ function renderModels(scope = { ...selected }) {
     const testState = testResults.get(rowKey);
     renderChanged(tr, [m, testState], () => {
       tr.className = m.enabled ? '' : 'off'; tr.replaceChildren();
-      tr.append(node('td', m.id, 'model-id'));
+      const idCell = node('td', m.id, 'model-id');
+      // Roster facts: effort rungs, context window, quota factor and the adaptive
+      // flag tell the operator what the relay will actually accept for this id —
+      // and how much of the shared pool one request costs — before wasting a call.
+      const facts = [];
+      if (m.effort?.length) facts.push('推理档 ' + m.effort.join('/'));
+      if (m.context_window) facts.push('上下文 ' + Math.round(m.context_window / 1000) + 'k');
+      if (m.max_output) facts.push('最大输出 ' + Math.round(m.max_output / 1000) + 'k');
+      if (m.quota_factor != null && m.quota_factor !== 1) facts.push('额度系数 ' + m.quota_factor);
+      if (m.auto_compact_ratio) facts.push('自动压缩 ' + Math.round(m.auto_compact_ratio * 100) + '%');
+      if (m.adaptive) facts.push('adaptive 档位');
+      if (m.withdrawn) facts.push('已下架');
+      else if (m.served === false) facts.push('未在 served');
+      if (m.pricing) {
+        const p = m.pricing, usd = (v) => (typeof v === 'number' ? '$' + (v < 1 ? v.toFixed(2) : v) : null);
+        const price = [['入', p.input], ['出', p.output]].map(([k, v]) => usd(v) && k + ' ' + usd(v)).filter(Boolean);
+        if (price.length) facts.push(price.join(' / ') + ' 每百万');
+      }
+      if (facts.length) idCell.append(node('div', facts.join(' · '), 'hint'));
+      tr.append(idCell);
       const fam = node('td'); fam.append(node('span', familyName(m.family), 'chip')); tr.append(fam);
       const st = node('td'); st.append(m.enabled ? pill('已启用', 'ok') : m.blocked ? pill('已屏蔽', 'bad') : m.filtered ? pill('未放行', '') : pill('已停用')); tr.append(st);
       const lat = node('td', '', 'lat-cell');
@@ -626,7 +878,7 @@ function renderModels(scope = { ...selected }) {
       if (m.enabled) {
         const button = node('button', testState?.pending ? '测试中…' : '测试', 'secondary small'); button.disabled = Boolean(testState?.pending);
         button.addEventListener('click', guarded(async () => {
-          if (!confirm('测试 ' + m.id + ' 会发送真实请求、消耗额度，是否继续？')) return;
+          if (!await ask({ title: '测试 ' + m.id + '？', message: '会发送真实请求并消耗额度。', confirmLabel: '发送测试' })) return;
           await runModelTest(scope, m.id);
         }));
         actions.append(button);
@@ -649,14 +901,24 @@ function renderModels(scope = { ...selected }) {
     box.replaceChildren(all,...families.map(f=>{const o=node('option',familyName(f));o.value=f;return o;}));
     box.value=families.includes(before)?before:'all';
   });
-  const filtered = filterModels(modelRows, $('model-search').value, $('model-filter').value, $('model-family').value, scope);
+  const filtered = sortModels(filterModels(modelRows, $('model-search').value, $('model-filter').value, $('model-family').value, scope), $('model-sort')?.value || 'default');
   renderChanged('models', [identity(scope), filtered.map(m => m.id)], box => {
     const rows = filtered.map(m => modelNodes.get(identity(scope) + '|' + m.id));
     if (rows.length) box.replaceChildren(...rows);
     else { const tr = document.createElement('tr'), td = node('td'); td.colSpan = 6; td.append(empty(modelRows.length?'没有匹配的模型，可清除搜索或切换筛选条件。':'上游目录为空')); tr.append(td); box.replaceChildren(tr); }
   });
   const on = modelRows.filter(m => m.enabled).length;
-  renderChanged('model-summary', [on, modelRows.length, families.length, filtered.length], box => box.replaceChildren(pill('已启用 ' + on, 'ok'), pill(`显示 ${filtered.length} / ${modelRows.length}`), pill(families.length + ' 个系列', 'info')));
+  const withdrawn = modelRows.filter(m => m.withdrawn).length;
+  const notServed = modelRows.filter(m => !m.withdrawn && m.served === false).length;
+  const source = modelRows.find((m) => m.source)?.source;
+  renderChanged('model-summary', [on, modelRows.length, families.length, filtered.length, withdrawn, notServed, source],
+    box => box.replaceChildren(
+      pill('已启用 ' + on, 'ok'),
+      pill(`显示 ${filtered.length} / ${modelRows.length}`),
+      pill(families.length + ' 个系列', 'info'),
+      ...(withdrawn ? [pill(`已下架 ${withdrawn}`, 'bad')] : []),
+      ...(notServed ? [pill(`未路由 ${notServed}`, 'warn')] : []),
+      ...(source === 'roster' ? [pill('读取自 roster', 'warn')] : [])));
   renderChanged('families', [identity(scope), modelRows.map(m => [m.id, m.family, m.enabled])], () => renderFamilies());
   const liveRows = new Set(modelRows.map(m => identity(scope) + '|' + m.id));
   for (const [id] of modelNodes) if (!liveRows.has(id)) modelNodes.delete(id);
@@ -674,7 +936,14 @@ async function runModelTest(scope, id) {
 }
 async function models() {
   const read = beginRead('models');
-  const rows = await api('models', scoped({}, read.scope), read.scope.target);
+  let rows;
+  try {
+    rows = await api('models', scoped({}, read.scope), read.scope.target);
+  } catch (err) {
+    if (read.valid()) cardState($('models')?.closest?.('.card') || $('models'), 'error', {
+      message: `模型目录读取失败：${err.message}`, retry: models });
+    throw err;
+  }
   if (!read.valid()) return;
   modelRows = rows; modelsFor = identity(read.scope); modelsUpdatedAt = Date.now();
   modelRows.sort((a, b) => familyOrder(a.family) - familyOrder(b.family) || (a.family || '').localeCompare(b.family || '') || a.id.localeCompare(b.id));
@@ -762,7 +1031,11 @@ async function usagePage() {
     if (!read.valid() || days !== Number($('usage-days').value || 7) || model !== ($('usage-model').value || '')) return;
     usageData = data; usageFor = identity(read.scope); renderUsage(); markRefreshed();
   } catch (err) {
-    if (read.valid()) $('usage-state').textContent = '用量读取失败，稍后自动重试' + (usageFor === identity() ? '；下方保留上次快照。' : '。');
+    if (read.valid()) {
+      $('usage-state').textContent = '用量读取失败，稍后自动重试' + (usageFor === identity() ? '；下方保留上次快照。' : '。');
+      cardState($('usage-content'), usageFor === identity() ? 'stale' : 'error', {
+        message: usageFor === identity() ? '下面显示的是上一次成功读取的快照。' : '用量读取失败。', retry: usagePage });
+    }
     throw err;
   }
 }
@@ -787,13 +1060,28 @@ function downloadUsage(recent) {
 async function logs() {
   const read = beginRead('logs'), r = await api('logs', { limit: 400 }, read.scope.target);
   if (!read.valid()) return;
-  const filter = $('log-filter').value.trim().toLowerCase();
-  const lines = (r.lines || []).filter((l) => !filter || l.toLowerCase().includes(filter));
+  const filter = ($('log-filter')?.value || '').trim().toLowerCase();
+  const level = ($('log-level')?.value || 'all').toLowerCase();
+  const levelOf = (line) => {
+    const m = /\b(ERROR|WARN|INFO|DEBUG)\b/i.exec(line); return m ? m[1].toUpperCase() : '';
+  };
+  let lines = (r.lines || []).filter((l) => !level || level === 'all' || levelOf(l) === level.toUpperCase());
+  if (filter) lines = lines.filter((l) => l.toLowerCase().includes(filter));
   const pre = $('logs'), atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  const text = lines.length ? lines.join('\n') : (filter ? '没有匹配的日志行' : '暂无日志');
+  // A paused view must not jump while the operator is reading a stack trace.
+  const paused = $('log-follow') && !$('log-follow').checked;
+  const text = lines.length ? lines.join('\n') : (filter || level !== 'all' ? '没有匹配的日志行' : '暂无日志');
   if (pre.textContent === text) return;
   pre.textContent = text;
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  if (atBottom && !paused) pre.scrollTop = pre.scrollHeight;
+}
+function downloadLogs() {
+  const text = $('logs')?.textContent || '';
+  if (!text || text === '正在读取…') { notice('当前没有可下载的日志', true); return; }
+  const blob = new Blob([text + '\n'], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = 'mirasim-logs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.log';
+  document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 const phases = { idle: ['等待操作', ''], checking: ['检查发布', 'info'], pulling: ['拉取并验证镜像', 'info'], activating: ['重建容器并验证服务', 'info'], succeeded: ['升级成功', 'ok'], failed: ['准备失败，运行中的容器未改变', 'bad'], rolling_back: ['正在回退', 'warn'], rolled_back: ['已回退', 'warn'], rollback_failed: ['回退未完成，需要排查', 'bad'] };
@@ -871,6 +1159,10 @@ async function refreshVisible({ fast = false, force = false } = {}) {
   if (view === 'overview') tasks.push(fleet(), overview());
   if (view === 'accounts') {
     tasks.push(keeperCard(), connectionStatus());
+    // Local-only read, but it still costs a round trip: keep it out of fast
+    // polling (which exists for in-flight operations) and refresh it on the normal
+    // pass, on account switch, or while a re-login is open.
+    if (!fast && (reauthSession || reauthFor !== identity() || force)) tasks.push(reauthState());
     if (!fast) tasks.push(overview(), codexCard(), profiles());
   }
   if (view === 'models' && (force || modelsFor !== identity() || Date.now() - modelsUpdatedAt >= 30000)) tasks.push(models());
@@ -894,6 +1186,10 @@ function schedulePoll(delay) {
   clearTimeout(timer);
   if (key) timer = setTimeout(pollVisible, delay ?? (pollingFast() ? 2000 : 15000));
 }
+// Consecutive failures back off instead of hammering a bridge that is already
+// struggling. The header says how stale the data is rather than pretending live.
+let pollFailures = 0, lastGoodPoll = 0;
+const POLL_BACKOFF_MS = [15000, 30000, 60000];
 async function pollVisible() {
   if (!key) return;
   if (document.hidden || polling) { schedulePoll(); return; }
@@ -903,10 +1199,18 @@ async function pollVisible() {
     const fast = pollingFast() && Date.now() - lastRegularPoll < 15000;
     await refreshVisible({ fast });
     if (!fast) lastRegularPoll = Date.now();
+    pollFailures = 0; lastGoodPoll = Date.now();
     $('auto-refresh-state').textContent = '自动更新中';
   } catch {
-    $('auto-refresh-state').textContent = '连接暂不可用，稍后自动重试';
-  } finally { polling = false; schedulePoll(); }
+    pollFailures++;
+    $('auto-refresh-state').textContent = lastGoodPoll
+      ? `连接暂不可用，已在 ${relative(lastGoodPoll)} 成功同步；稍后自动重试`
+      : '连接暂不可用，稍后自动重试';
+  } finally {
+    polling = false;
+    const normal = pollingFast() ? 2000 : 15000;
+    schedulePoll(pollFailures ? POLL_BACKOFF_MS[Math.min(pollFailures - 1, POLL_BACKOFF_MS.length - 1)] : normal);
+  }
 }
 async function refresh() {
   if (view !== 'overview') await fleet();
@@ -934,13 +1238,119 @@ async function selectAccount(scope) {
   await refresh();
 }
 async function showView(next) {
+  if (!VIEWS.includes(next)) next = 'overview';
   if (next !== 'accounts') hideAccess();
+  const moved = next !== view;
   view = next; $('page-title').textContent = titles[next];
-  for (const el of document.querySelectorAll('[data-section]')) el.hidden = el.dataset.section !== next;
-  for (const el of document.querySelectorAll('[data-view]')) el.classList.toggle('selected', el.dataset.view === next);
+  for (const el of document.querySelectorAll('[data-section]') || []) el.hidden = el.dataset.section !== next;
+  for (const el of document.querySelectorAll('[data-view]') || []) {
+    const on = el.dataset.view === next;
+    el.classList.toggle('selected', on);
+    // aria-current is what a screen reader announces; .selected is only paint.
+    if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+  }
+  syncHash(next);
+  // Move focus to the heading so keyboard and SR users land on the new content
+  // instead of staying on the sidebar button they just activated.
+  if (moved && root) {
+    const heading = $('page-title');
+    if (heading && typeof heading.focus === 'function') {
+      heading.setAttribute('tabindex', '-1');
+      try { heading.focus({ preventScroll: true }); } catch { /* older engines */ }
+    }
+  }
   if (key) { try { await refreshVisible(); } catch (e) { notice(e.message, true); } schedulePoll(); }
 }
-for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => showView(button.dataset.view));
+if (win && win.addEventListener) win.addEventListener('hashchange', () => { if (suppressHash) return; const next = viewFromHash(); if (next !== view) showView(next); });
+for (const button of document.querySelectorAll('[data-view]') || []) button.addEventListener('click', () => showView(button.dataset.view));
+for (const button of document.querySelectorAll('[data-theme-choice]') || []) button.addEventListener('click', () => setTheme(button.dataset.themeChoice));
+applyTheme(themeChoice());
+if (win && win.matchMedia) {
+  const scheme = win.matchMedia('(prefers-color-scheme: dark)');
+  const onChange = () => { if (themeChoice() === 'system') applyTheme('system'); };
+  if (scheme.addEventListener) scheme.addEventListener('change', onChange);
+  else if (scheme.addListener) scheme.addListener(onChange);
+}
+
+// ---- keyboard --------------------------------------------------------------
+// Nothing in the console was reachable without a mouse except plain Tab order.
+// Ctrl/⌘+K jumps accounts, views and the common read-only actions; "/" focuses
+// the current page's search box; g-then-letter is a vim-style view jump.
+let goPrefix = false;
+function focusSearch() {
+  const id = { accounts: 'account-search', models: 'model-search', logs: 'log-filter', usage: 'usage-model' }[view];
+  const field = id ? $(id) : null;
+  if (field && typeof field.focus === 'function') { field.focus(); if (field.select) field.select(); return true; }
+  return false;
+}
+function commandItems() {
+  const items = VIEWS.map((v) => ({ label: `前往：${titles[v]}`, run: () => showView(v) }));
+  for (const r of fleetRows) items.push({ label: `切换账号：${label(r)}`, run: () => selectAccount({ target: r.target, account: r.account }) });
+  items.push({ label: '刷新当前页面', run: refresh });
+  if (view === 'accounts') items.push({ label: '检测当前账号连接', run: () => checkConnection(selected.target, selected.account) });
+  if (view === 'models') items.push({ label: '重新加载模型目录', run: models });
+  if (view === 'logs') items.push({ label: '刷新运行日志', run: logs });
+  items.push({ label: `外观：${themeChoice() === 'system' ? '跟随系统' : themeChoice() === 'dark' ? '深色' : '浅色'}（切换）`, run: () => setTheme(themeChoice() === 'system' ? 'light' : themeChoice() === 'light' ? 'dark' : 'system') });
+  return items;
+}
+function openCommandPalette() {
+  if (!key) return;
+  const backdrop = node('div', '', 'dialog-backdrop');
+  const dialog = node('div', '', 'dialog command-palette');
+  dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-label', '命令面板');
+  const input = document.createElement('input');
+  input.type = 'search'; input.placeholder = '输入命令或账号名…'; input.setAttribute('aria-label', '命令搜索');
+  input.className = 'command-input';
+  const list = node('div', '', 'command-list'); list.setAttribute('role', 'listbox');
+  dialog.append(input, list);
+  const items = commandItems().slice(0, 60);
+  let filtered = items.slice(), cursor = 0;
+  const close = () => {
+    if (dialog.remove) dialog.remove();
+    if (backdrop.remove) backdrop.remove();
+    if (typeof document.removeEventListener === 'function') document.removeEventListener('keydown', onKey, true);
+  };
+  const draw = () => {
+    list.replaceChildren(...(filtered.length ? filtered.slice(0, 12).map((it, i) => {
+      const row = node('button', it.label, 'command-item' + (i === cursor ? ' current' : ''));
+      row.type = 'button'; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(i === cursor));
+      row.addEventListener('click', () => { close(); it.run(); });
+      return row;
+    }) : [node('p', '没有匹配的命令', 'empty')]));
+  };
+  const refilter = () => {
+    const q = input.value.trim().toLowerCase();
+    filtered = q ? items.filter((it) => it.label.toLowerCase().includes(q)) : items.slice();
+    cursor = 0; draw();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); cursor = Math.min(cursor + 1, Math.min(filtered.length, 12) - 1); draw(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); cursor = Math.max(cursor - 1, 0); draw(); return; }
+    if (e.key === 'Enter' && filtered[cursor]) { e.preventDefault(); close(); filtered[cursor].run(); }
+  };
+  input.addEventListener('input', refilter);
+  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', onKey, true);
+  if (typeof document.body.append === 'function') document.body.append(backdrop, dialog);
+  if (typeof input.focus === 'function') input.focus();
+  draw();
+  return close;
+}
+if (win && typeof win.addEventListener === 'function') {
+  win.addEventListener('keydown', (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || '') || e.target?.isContentEditable;
+    if ((e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 'k') { e.preventDefault(); openCommandPalette(); return; }
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { if (focusSearch()) e.preventDefault(); return; }
+    if (e.key === '?') { e.preventDefault(); notice('快捷键：Ctrl/⌘+K 命令面板 · / 聚焦搜索 · g 后接 o/a/m/u/l/r 跳转视图'); return; }
+    if (e.key === 'g') { goPrefix = true; setTimeout(() => { goPrefix = false; }, 1200); return; }
+    if (goPrefix) {
+      const map = { o: 'overview', a: 'accounts', m: 'models', u: 'usage', l: 'logs', r: 'release' };
+      goPrefix = false;
+      if (map[e.key]) { e.preventDefault(); showView(map[e.key]); }
+    }
+  });
+}
 $('notice-close').addEventListener('click', () => { $('notice').hidden = true; });
 $('login-form').addEventListener('submit', guarded(async () => {
   key = $('key').value.trim(); if (!/^[a-f0-9]{64}$/.test(key)) throw Error('请输入有效的 64 位管理密钥');
@@ -951,6 +1361,16 @@ $('login-form').addEventListener('submit', guarded(async () => {
   schedulePoll();
 }));
 $('logout').addEventListener('click', () => { hideAccess(); key = ''; clearTimeout(timer); location.reload(); });
+// Password reveal: typing a 64-hex panel key blind is error-prone, and browsers
+// block paste on some managed profiles unless the field is a normal password input.
+if ($('key-toggle')) $('key-toggle').addEventListener('click', () => {
+  const field = $('key'); if (!field) return;
+  const reveal = field.type === 'password';
+  field.type = reveal ? 'text' : 'password';
+  $('key-toggle').textContent = reveal ? '隐藏' : '显示';
+  $('key-toggle').setAttribute('aria-pressed', String(reveal));
+  if (typeof field.focus === 'function') field.focus();
+});
 $('refresh').addEventListener('click', guarded(refresh)); $('load-models').addEventListener('click', guarded(models)); $('load-logs').addEventListener('click', guarded(logs));
 $('reveal-key').addEventListener('click', guarded(revealAccess));
 $('hide-key').addEventListener('click', hideAccess);
@@ -966,6 +1386,72 @@ $('refresh-membership').addEventListener('click', guarded(async () => {
   const read = beginRead('membership');
   const data = await api('membership/refresh', scoped({}, read.scope), read.scope.target);
   if (read.valid()) { renderMembership(data); notice('会员状态已查询'); }
+}));
+if ($('check-reauth')) $('check-reauth').addEventListener('click', guarded(async () => {
+  const state = await reauthState();
+  if (state) notice(state.needs_reauth ? '该账号需要重新登录。' : '登录状态正常。', state.needs_reauth);
+}));
+if ($('reauth-start')) $('reauth-start').addEventListener('click', guarded(startReauth));
+if ($('reauth-status')) $('reauth-status').addEventListener('click', guarded(queryReauth));
+if ($('reauth-cancel')) $('reauth-cancel').addEventListener('click', guarded(async () => {
+  const session = reauthSession; if (!session) return;
+  await api('login/cancel', { id: session.id }, session.target).catch(() => {});
+  reauthSession = null;
+  if ($('reauth-box')) $('reauth-box').hidden = true;
+  if ($('reauth-cancel')) $('reauth-cancel').hidden = true;
+  reauthMessage('本次重新登录已取消，旧凭证仍在用。');
+}));
+if ($('reauth-form')) $('reauth-form').addEventListener('submit', guarded(async (e) => {
+  e.preventDefault();
+  const session = reauthSession;
+  if (!session) throw Error('请先点击“重新登录当前账号”');
+  const value = ($('reauth-code')?.value || '').trim();
+  if (!value) throw Error('请粘贴授权回调地址或输入验证码');
+  reauthMessage('正在提交并校验新凭证…');
+  let r;
+  try { r = await api('login/complete', { id: session.id, callback: value }, session.target); }
+  catch (err) {
+    // The response may be lost after the credential was already written.
+    const status = await api('login/status', { id: session.id }, session.target).catch(() => null);
+    if (status?.stage === 'saved') return finishReauth(status);
+    reauthMessage(`未完成：${err.message}`);
+    throw err;
+  }
+  if ($('reauth-code')) $('reauth-code').value = '';
+  await finishReauth(r);
+}));
+if ($('check-reauth')) $('check-reauth').addEventListener('click', guarded(async () => {
+  const state = await reauthState();
+  if (state) notice(state.needs_reauth ? '该账号需要重新登录。' : '登录状态正常。', state.needs_reauth);
+}));
+if ($('reauth-start')) $('reauth-start').addEventListener('click', guarded(startReauth));
+if ($('reauth-status')) $('reauth-status').addEventListener('click', guarded(queryReauth));
+if ($('reauth-cancel')) $('reauth-cancel').addEventListener('click', guarded(async () => {
+  const session = reauthSession; if (!session) return;
+  await api('login/cancel', { id: session.id }, session.target).catch(() => {});
+  reauthSession = null;
+  if ($('reauth-box')) $('reauth-box').hidden = true;
+  if ($('reauth-cancel')) $('reauth-cancel').hidden = true;
+  reauthMessage('本次重新登录已取消，旧凭证仍在用。');
+}));
+if ($('reauth-form')) $('reauth-form').addEventListener('submit', guarded(async (e) => {
+  e.preventDefault();
+  const session = reauthSession;
+  if (!session) throw Error('请先点击“重新登录当前账号”');
+  const value = ($('reauth-code')?.value || '').trim();
+  if (!value) throw Error('请粘贴授权回调地址或输入验证码');
+  reauthMessage('正在提交并校验新凭证…');
+  let r;
+  try { r = await api('login/complete', { id: session.id, callback: value }, session.target); }
+  catch (err) {
+    // The response may be lost after the credential was already written.
+    const status = await api('login/status', { id: session.id }, session.target).catch(() => null);
+    if (status?.stage === 'saved') return finishReauth(status);
+    reauthMessage(`未完成：${err.message}`);
+    throw err;
+  }
+  if ($('reauth-code')) $('reauth-code').value = '';
+  await finishReauth(r);
 }));
 $('keeper-form').addEventListener('submit', guarded(async () => {
   const scope = { ...selected };
@@ -999,6 +1485,21 @@ $('clear-account-search').addEventListener('click', () => {
   $('account-search').value=''; $('account-filter').value='all'; $('account-sort').value='default'; renderFleet();
 });
 for (const id of ['model-search','model-filter','model-family']) $(id).addEventListener(id==='model-search'?'input':'change', () => renderModels());
+if ($('model-sort')) $('model-sort').addEventListener('change', () => renderModels());
+if ($('export-models')) $('export-models').addEventListener('click', guarded(() => {
+  if (!modelRows.length) throw Error('请先加载模型目录');
+  const scope = { ...selected };
+  const payload = { exported_at: new Date().toISOString(), account: label(scope), models: sortModels(modelRows, $('model-sort')?.value || 'default')
+    .map((m) => ({ id: m.id, family: m.family, enabled: m.enabled, served: m.served, withdrawn: m.withdrawn,
+      effort: m.effort || null, context_window: m.context_window || null, max_output: m.max_output || null,
+      quota_factor: m.quota_factor ?? null, adaptive: m.adaptive ?? null, auto_compact_ratio: m.auto_compact_ratio ?? null,
+      pricing: m.pricing || null, note: m.note || '' })) };
+  const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = 'mirasim-models-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+  document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  notice('模型目录已导出，只含目录元数据，不含密钥和账号信息。');
+}));
 $('clear-model-search').addEventListener('click', () => {
   $('model-search').value=''; $('model-filter').value='all'; $('model-family').value='all'; renderModels();
 });
@@ -1024,18 +1525,21 @@ $('export-usage').addEventListener('click', guarded(() => downloadUsage(false)))
 $('export-usage-recent').addEventListener('click', guarded(() => downloadUsage(true)));
 document.addEventListener('visibilitychange', () => { if (document.hidden) hideAccess(); else schedulePoll(0); });
 $('log-filter').addEventListener('input', () => { logs().catch(() => {}); });
+if ($('log-level')) $('log-level').addEventListener('change', () => { logs().catch(() => {}); });
+if ($('download-logs')) $('download-logs').addEventListener('click', downloadLogs);
 $('check-release').addEventListener('click', guarded(() => checkRelease(true)));
 $('follow-latest').addEventListener('click', guarded(async () => {
-  if (!confirm('将当前固定版本地址改为同一个 GitHub 仓库的最新正式发布？不会立即升级或改变账号。')) return;
+  if (!await ask({ title: '改回跟随最新发布？', message: '将当前固定版本地址改为同一个 GitHub 仓库的最新正式发布。不会立即升级，也不改变账号。', confirmLabel: '改回跟随' })) return;
   await api('release/follow-latest', { confirm: true }); await checkRelease(true);
 }));
 $('settings-form').addEventListener('submit', guarded(async () => {
   const scope = { ...selected };
   const data = scoped({ max_concurrency: Number($('max-concurrency').value), kimi_max_concurrency: Number($('kimi-concurrency').value), model_fallback: $('model-fallback').value, kimi_default_effort: $('kimi-effort').value, gpt_default_effort: $('gpt-effort').value });
+  if (!$('replay-buffer').disabled && $('replay-buffer').value !== '') data.replay_buffer_mb = Number($('replay-buffer').value);
   const r = await api('settings', data, scope.target);
   if (!sameAccount(scope)) return;
   dirtyForms.delete('settings-form');
-  notice(`${label(scope)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
+  notice(`${label(scope)}：并发 总 ${r.max_concurrency} · Kimi ${r.kimi_max_concurrency} · 请求体上限 ${r.replay_buffer_mb === undefined ? '（旧版 bridge 未支持）' : r.replay_buffer_mb + ' MB'} · Kimi 推理档 ${r.kimi_default_effort === undefined ? '（旧版 bridge 未支持）' : (r.kimi_default_effort || '不干预')}；模型被替换时${r.model_fallback === 'forbid' ? '中断本轮' : '照常回复并记录'}。已立即生效。`); await overview();
 }));
 $('codex-form').addEventListener('submit', guarded(async () => {
   const scope = { ...selected };
@@ -1051,10 +1555,35 @@ $('target').addEventListener('change', guarded(async () => {
   const [target, account] = $('target').value.split('|');
   await selectAccount({ target, account }); notice(`已选择 ${label(selected)}。`);
 }));
-$('pause-account').addEventListener('click', guarded(async () => { if (!confirm(`暂停 ${label(selected)} 的调度？它会立即从 sub2 池子里摘出，直到手动恢复。`)) return; const r = await api('account/pause', scoped()); notice(r.paused ? '已暂停调度' : (r.managed ? '暂停请求未完全成功，请到 sub2 后台确认' : '该账号未接入 sub2，已标记为保持暂停'), !r.paused && r.managed); await refresh(); }));
+$('pause-account').addEventListener('click', guarded(async () => {
+  const scope = { ...selected };
+  if (!await ask({ title: `暂停 ${label(scope)} 的调度？`, message: '它会立即从 sub2 池子里摘出，直到手动恢复。', confirmLabel: '暂停调度', tone: 'danger' })) return;
+  const r = await api('account/pause', scoped({}, scope), scope.target);
+  await refresh();
+  if (r.paused) {
+    // Pause is reversible, so offer the undo instead of a second confirmation.
+    undoable(`${label(scope)} 已暂停调度`, async () => {
+      await api('account/resume', scoped({}, scope), scope.target);
+      notice(`${label(scope)} 已恢复调度`); await refresh();
+    }, '恢复调度');
+  } else {
+    notice(r.managed ? '暂停请求未完全成功，请到 sub2 后台确认' : '该账号未接入 sub2，已标记为保持暂停', !r.paused && r.managed);
+  }
+}));
 $('resume-account').addEventListener('click', guarded(async () => { const r = await api('account/resume', scoped()); notice(r.note || '已恢复'); await refresh(); }));
-for (const action of ['start', 'stop']) $(`${action}-account`).addEventListener('click', guarded(async () => { if (!confirm(`${action === 'stop' ? '停止' : '启动'} ${selected.target} 的容器？`)) return; await api(action); notice('操作完成。首次启动可能需要等待数轮健康检查。'); await refresh(); }));
-for (const action of ['deploy', 'rollback']) $(action).addEventListener('click', guarded(async () => { if (!confirm(action === 'deploy' ? '升级所有受管且运行中的 bridge，并同步更新宿主机后台？切换时短暂停服。' : '将所有快照账号和宿主机后台恢复到上一次版本？')) return; const r = await api(action); notice(r.accepted ? '任务已接受，以下进度来自服务器实际状态。' : '未接受：任务正在运行或没有可用回退。', !r.accepted); await deployment(); }));
+for (const action of ['start', 'stop']) $(`${action}-account`).addEventListener('click', guarded(async () => { const stopping = action === 'stop'; if (!await ask({ title: `${stopping ? '停止' : '启动'} ${selected.target} 的容器？`, message: stopping ? '会排空请求并尝试暂停 sub2 账号。' : '首次启动可能需要等待数轮健康检查。', confirmLabel: stopping ? '停止容器' : '启动容器', tone: stopping ? 'danger' : 'default' })) return; await api(action); notice('操作完成。首次启动可能需要等待数轮健康检查。'); await refresh(); }));
+for (const action of ['deploy', 'rollback']) $(action).addEventListener('click', guarded(async () => {
+  const rollback = action === 'rollback';
+  if (!await ask({
+    title: rollback ? '回退到上一次版本？' : '升级到最新发布？',
+    message: rollback ? '所有快照账号和宿主机后台都会恢复到上一次版本。' : '升级所有受管且运行中的 bridge，并同步更新宿主机后台；切换时短暂停服，失败会自动尝试回退。',
+    confirmLabel: rollback ? '确认回退' : '确认升级', tone: rollback ? 'danger' : 'default',
+    // Rollback is the one action that can strand a working deployment, so make the
+    // operator type the word instead of double-clicking through it.
+    ...(rollback ? { requireTyped: '回退' } : {}),
+  })) return;
+  const r = await api(action); notice(r.accepted ? '任务已接受，以下进度来自服务器实际状态。' : '未接受：任务正在运行或没有可用回退。', !r.accepted); await deployment();
+}));
 $('deploy-status').addEventListener('click', guarded(deployment));
 $('new-account').addEventListener('click', guarded(async () => {
   if (loginSession) { $('account-dialog').showModal(); return; }
