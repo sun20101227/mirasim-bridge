@@ -1086,7 +1086,7 @@ function downloadLogs() {
 
 const phases = { idle: ['等待操作', ''], checking: ['检查发布', 'info'], pulling: ['拉取并验证镜像', 'info'], activating: ['重建容器并验证服务', 'info'], succeeded: ['升级成功', 'ok'], failed: ['准备失败，运行中的容器未改变', 'bad'], rolling_back: ['正在回退', 'warn'], rolled_back: ['已回退', 'warn'], rollback_failed: ['回退未完成，需要排查', 'bad'] };
 const steps = { fetch_manifest: '获取发布清单', pull_image: '拉取镜像', verify_image: '验证镜像', stage_host: '准备宿主机文件', snapshot: '记录原容器', activate_image: '切换镜像', stop_container: '停止旧容器', start_container: '启动新容器', check_health: '检查服务', install_host: '更新后台', restore_host: '恢复后台', restore_image: '恢复镜像', restore_container: '恢复容器', restore_health: '检查恢复后的服务', restore_tag: '恢复镜像标签' };
-const errors = { command_timeout: '命令超时', command_unavailable: '命令不可执行', docker_operation_failed: 'Docker 操作失败', container_not_running: '容器未运行', container_missing: '容器不存在', image_missing: '镜像不存在', disk_full: '磁盘空间不足', permission_denied: '权限不足', docker_unavailable: 'Docker 服务不可用', bridge_unresponsive: '桥接器未正常响应', operation_failed: '操作失败' };
+const errors = { command_timeout: '命令超时', command_unavailable: '命令不可执行', docker_operation_failed: 'Docker 操作失败', container_not_running: '容器未运行', container_missing: '容器不存在', image_missing: '镜像不存在', rollback_tag_ambiguous: '多个账号的镜像不一致，无法确定回退点', disk_full: '磁盘空间不足', permission_denied: '权限不足', docker_unavailable: 'Docker 服务不可用', bridge_unresponsive: '桥接器未正常响应', operation_failed: '操作失败' };
 async function deployment() {
   if (!host) return;
   const read = beginRead('deployment'), s = await api('deployment', {}, 'main');
@@ -1103,6 +1103,13 @@ async function deployment() {
   if (s.host_restored) box.append(node('span', '宿主机后台已回退到上一版本。'));
   if (s.error) box.append(node('span', s.error));
   for (const failure of [s.failure, ...(s.recovery_errors || [])].filter(Boolean)) box.append(node('span', `${failure.target || '后台'} · ${steps[failure.step] || failure.step}：${errors[failure.code] || failure.code}`));
+  // Some failures have exactly one fix and no amount of retrying helps. Say what
+  // to run instead of leaving the operator to decode a Docker error string.
+  const REMEDIES = {
+    rollback_tag_ambiguous: '多个账号当前运行在不同镜像上，无法安全地自动选一个作为回退点。请先把这些账号统一到同一镜像（或逐个升级），再重试。自动挑选会破坏其他账号的回退能力，所以这里不做猜测。',
+  };
+  const remedy = [s.failure, ...(s.recovery_errors || [])].map((f) => f && REMEDIES[f.code]).find(Boolean);
+  if (remedy) box.append(node('span', remedy, 'warn-text'));
   for (const [name, health] of Object.entries(s.target_health || {})) {
     if (!health.upstream_ready || (health.managed && (!health.reachable || health.schedulable !== 'on'))) box.append(node('span', `${name}：桥接器 ${health.version} 已响应，调度/上游尚未就绪或已手动暂停。请在概览确认。`));
   }

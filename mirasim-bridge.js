@@ -29,7 +29,7 @@ const { summarizeRoster, rosterIds, modelInfo } = require('./lib/roster');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 const IS_WIN = process.platform === 'win32';
 
 /**

@@ -450,7 +450,29 @@ class Agent:
                 items.append({'target': dict(target), 'image': info['Image']})
         if not items:
             raise ValueError('No running bridge targets; finish initial setup first')
-        tag = self.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', LOCAL_IMAGE])
+        # A rollback tags this id back onto LOCAL_IMAGE, so it must resolve before
+        # any container is touched. Normally it does — the running container was
+        # started from that tag. It can be missing when the tag was pruned, the
+        # host was rebooted after a `docker image prune`, or the deployment was
+        # originally built under a different name.
+        #
+        # The running container's own image id is exactly what rollback should
+        # restore, so re-pointing the tag at it repairs the invariant instead of
+        # stopping with an error the operator has to decode. `docker tag` adds an
+        # alias; it never replaces or restarts anything.
+        try:
+            tag = self.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', LOCAL_IMAGE])
+        except DeploymentError as exc:
+            if exc.code != 'image_missing':
+                raise
+            images = {item['image'] for item in items}
+            if len(images) != 1:
+                # Several different images across targets: guessing which one is
+                # "current" would break rollback for the others. Refuse and say so.
+                raise DeploymentError('rollback_tag_ambiguous') from None
+            current = images.pop()
+            self.run(['docker', 'tag', current, LOCAL_IMAGE])
+            tag = self.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', LOCAL_IMAGE])
         return items, tag
 
     def ready(self, target):

@@ -106,6 +106,61 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(agent.status()['phase'], 'failed')
             self.assertFalse(any('stop' in c or c[:2] == ['docker', 'tag'] for c in self.calls))
 
+    def test_missing_local_tag_is_repaired_from_the_running_container(self):
+        # Observed in production: docker image inspect mirasim-bridge:local says
+        # "no such image" while the container it should point at runs fine (the
+        # tag was pruned). The container's own image id is exactly what rollback
+        # needs, so the agent re-points the tag instead of failing the deploy.
+        agent = self.agent()
+        repaired = []
+
+        def run(args, timeout=180):
+            if args[:2] == ['docker', 'tag'] and args[-1] == m.LOCAL_IMAGE:
+                repaired.append(args[2])
+            if args[:3] == ['docker', 'image', 'inspect'] and args[-1] == m.LOCAL_IMAGE and not repaired:
+                raise m.DeploymentError('image_missing')
+            return self.run_docker(args, timeout)
+
+        agent.run = run
+        agent.deploy()
+        self.assertEqual(agent.status()['phase'], 'succeeded')
+        self.assertEqual(repaired[0], OLD, 'the missing tag is re-pointed at the running image')
+        self.assertTrue(any(c[-2:] == ['stop', 'bridge'] for c in self.calls), 'the deploy then proceeds')
+
+    def test_ambiguous_images_across_targets_are_not_guessed(self):
+        # Two targets on different images: picking one would silently break the
+        # other's rollback, so the deploy must stop and say why.
+        self.cfg['targets'] = [{'name': 'main', 'compose_file': 'compose.yaml'},
+                               {'name': 'second', 'compose_file': 'compose.profile.yaml'}]
+        agent = self.agent()
+        images = iter(['a' * 64, 'b' * 64])
+
+        def run(args, timeout=180):
+            if args[:3] == ['docker', 'image', 'inspect'] and args[-1] == m.LOCAL_IMAGE:
+                raise m.DeploymentError('image_missing')
+            if args[:2] == ['docker', 'inspect']:
+                return json.dumps({'State': {'Running': True}, 'Image': next(images, 'a' * 64)})
+            return self.run_docker(args, timeout)
+
+        agent.run = run
+        agent.deploy()
+        status = agent.status()
+        self.assertEqual(status['phase'], 'failed')
+        self.assertEqual(status['failure']['code'], 'rollback_tag_ambiguous')
+        self.assertFalse(any(c[:2] == ['docker', 'tag'] for c in self.calls))
+
+    def test_other_docker_failures_keep_their_own_code(self):
+        agent = self.agent()
+
+        def run(args, timeout=180):
+            if args[:3] == ['docker', 'image', 'inspect'] and args[-1] == m.LOCAL_IMAGE:
+                raise m.DeploymentError('docker_unavailable')
+            return self.run_docker(args, timeout)
+
+        agent.run = run
+        agent.deploy()
+        self.assertEqual(agent.status()['failure']['code'], 'docker_unavailable')
+
     def test_failed_health_restores_previous_image(self):
         agent = self.agent()
         attempts = []
