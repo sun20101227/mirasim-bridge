@@ -1,42 +1,106 @@
-# “最新发布”停在旧版本（0.8.5）
+# 升级卡在“准备失败”，重试无效
 
-如果“当前运行”是旧版而“最新发布”是新版，点击升级即可。如果两者一直是 0.8.2，但 GitHub 已是新版，需检查服务器保存的发布源或下载代理缓存，不能只刷新浏览器，也不能认定 GitHub 没发布。
+## 先判断：是暂时性失败还是引导死锁
 
-旧版每次检查实际读取 `/etc/mirasim-deploy/config.json` 的 `manifest_url`。地址若为 `/releases/download/v0.8.2/deploy.json`，它就永远返回 0.8.2；此外旧工具的 60 秒缓存无法被手动检查绕过，下载重定向也没有缓存重验证。截图本身不能区分这些情况。
+看后台的**失败步骤**和**错误码**（“版本与升级”页会显示，例如 `后台 · 记录原容器：镜像不存在`）。
 
-## 当前服务器的一次性解决办法
+- 每次都停在同一处、错误码完全一样 → **重试不会有任何变化**，继续往下看。
+- 错误码会变，或时好时坏 → 属于暂时性问题（Docker 忙、磁盘、网络），先排除环境再重试。
 
-已装网页后台且部署状态为 `succeeded` 的服务器，在云厂商网页终端或宝塔/1Panel **宿主机终端**执行下面命令；不要求 SSH。下载明确的 0.8.5，不经过可能缓存的 latest 跳转：
+日志里出现 `Release preparation failed; running containers unchanged` 是好消息：准备阶段不改动运行中的容器，旧版本一直在正常服务，没有中断。
+
+## 引导死锁：修复装不上去
+
+宿主机部署工具 `/opt/mirasim-deploy/deploy-agent.py` 负责执行升级。它的更新时机是**部署成功之后**的 `install_host` 步骤：
+
+```
+snapshot()          ← 失败发生在这一步
+  ↓
+activate_image / stop / start / check_health
+  ↓
+install_host        ← 新 deploy-agent.py 在这里才被写入宿主机
+```
+
+因此，任何“修复位于部署成功之后才能安装的组件”的问题，都会形成死锁：**修复要等部署成功，部署成功又要等修复生效**。宿主机上跑的旧脚本没有新代码，重试一百次也是同一个报错。
+
+典型触发是 0.9.0 的 `mirasim-bridge:local` 回退标签被清理：
+
+```
+docker image inspect mirasim-bridge:local  →  no such image
+docker ps                                  →  容器在跑，版本正常
+```
+
+**缺的是标签，不是镜像。** 容器用的镜像 ID 一直存在，只是那个别名没了。
+
+## 一次性解决：在宿主机手动补回标签
+
+在云厂商网页终端 / 宝塔 / 1Panel 的**宿主机终端**执行（不是容器里）：
+
+```bash
+# 1. 查看容器与它实际使用的镜像
+sudo docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'
+
+# 2. 用运行中容器的镜像 ID 补回标签（只加别名，不替换、不重启容器）
+sudo docker tag \
+  "$(sudo docker inspect --format '{{.Image}}' "$(sudo docker ps -q --filter name=bridge | head -1)")" \
+  mirasim-bridge:local
+
+# 3. 确认标签已就位
+sudo docker image inspect --format '{{.Id}}' mirasim-bridge:local
+```
+
+第 2 条命令做的正是 0.9.1 起 `deploy-agent.py` 会自动做的事：把运行中容器的镜像 ID 重新指向 `mirasim-bridge:local`。`docker tag` 只是新增一个名字，**不会重建、停止或重启任何容器**，业务不中断。
+
+补完后回后台再点“升级至最新发布”。这次 `snapshot` 能取到镜像 ID，会一路跑完，并在 `install_host` 阶段装上含修复的新 `deploy-agent.py`——**以后不再需要手工干预**。
+
+### 容器名不是 bridge 时
+
+默认 Compose 项目把服务命名为 `bridge`。若第 2 条命令取到空值：
+
+```bash
+sudo docker ps --format '{{.Names}}\t{{.Image}}' | grep -i mirasim
+```
+
+用输出里实际的容器名替换 `--filter name=bridge`，或直接写镜像 ID：
+
+```bash
+sudo docker tag <镜像ID> mirasim-bridge:local
+```
+
+### 多个账号运行在不同镜像上
+
+不要手工挑一个补标签：那会让其他账号失去回退能力。0.9.1 起代理会直接拒绝并报 `rollback_tag_ambiguous`，此时应先把这些账号统一到同一镜像，或逐个升级，再重试。
+
+## 补完标签仍然失败
+
+说明还有第二个原因。此时错误归属已经准确（`snapshot` + 具体 code），把「版本与升级」页的完整状态和错误码发出来即可。常见后续：
+
+- `docker_unavailable` / `permission_denied`：Docker 服务或权限问题，与镜像无关。
+- `disk_full`：先清理磁盘，不要重试。
+- `bridge_unresponsive`：这是**已切换之后**的健康检查失败，会触发回退，属于另一类问题，见 [RECOVERY.md](RECOVERY.md)。
+
+## 什么时候需要重装宿主机工具
+
+只有当死锁无法靠补标签解除时（例如旧代理本身已经损坏），才需要在宿主机重新安装一次工具：
 
 ```bash
 update_dir="$(mktemp -d)"
 cd "$update_dir" &&
 curl -fL --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.5/mirasim-bridge-0.8.5-source.zip \
-  -o mirasim-bridge-0.8.5-source.zip &&
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.9.1/mirasim-bridge-0.9.1-source.zip \
+  -o mirasim-bridge-0.9.1-source.zip &&
 curl -fL --proto '=https' --proto-redir '=https' \
-  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.8.5/mirasim-bridge-0.8.5-source.zip.sha256 \
-  -o mirasim-bridge-0.8.5-source.zip.sha256 &&
-sha256sum -c mirasim-bridge-0.8.5-source.zip.sha256 &&
-unzip -q mirasim-bridge-0.8.5-source.zip &&
-sudo python3 mirasim-bridge/scripts/install-panel.py --follow-latest
+  https://github.com/sun20101227/mirasim-bridge/releases/download/v0.9.1/mirasim-bridge-0.9.1-source.zip.sha256 \
+  -o mirasim-bridge-0.9.1-source.zip.sha256 &&
+sha256sum -c mirasim-bridge-0.9.1-source.zip.sha256 &&
+unzip -q mirasim-bridge-0.9.1-source.zip &&
+sudo python3 mirasim-bridge/scripts/install-panel.py
 ```
 
-该命令沿用原面板域名、管理密钥、Compose 目录和账号配置，只更新宿主机工具/网页，并将**同一仓库**的 GitHub 发布源设为 latest。不会重建 bridge、重新登录 Mira、清除数据卷或自动改用别的仓库。安装时后台会短暂重启。
+下载地址写明版本号，不用 `latest`：`latest/download/` 里的文件名带版本，新版发布后会 404。
 
-随后：
+安装器沿用原面板域名、管理密钥、Compose 目录与账号配置，只更新宿主机工具和网页，**不重建 bridge、不重新登录 Mira、不清数据卷**。执行时后台会短暂重启，完成后刷新页面并重新输入管理密钥。
 
-1. 刷新管理网页并重新输入原管理密钥。
-2. 在“版本与升级”点击 **强制检查更新**。发布源应显示“自动跟随 … 的正式发布”，最新版本至少为 0.8.5。
-3. 点击“升级至最新发布”，等待 `succeeded`，再刷新确认**当前运行**版本。安装检测工具不会单独把 bridge 从 0.8.2 升级。
+> 重装工具**不会**单独升级 bridge 容器。工具装好后仍需在页面点一次“升级至最新发布”。
 
-如果配置是自定义下载代理/非匹配仓库，`--follow-latest` 会拒绝自动改源；可去掉此参数仅更新工具，在网页查看源类型并由管理员确认正确源。不要把自定义地址中的认证参数发到公开聊天。如果状态是 `rollback_failed`，先用 [RECOVERY.md](RECOVERY.md) 的恢复流程，不能把失败状态强制改为成功。
-
-## 新版检测行为
-
-- 自动查询保留短时缓存，手动点击强制刷新；页面明确显示检查时间与缓存标记。
-- GitHub 最新源先解析具体正式 tag，再取该 tag 的清单，要求版本一致且镜像来自已配置仓库并固定 sha256。API 暂不可达时可使用带缓存重验证的 latest 下载入口，并显示此回退方式。
-- 固定源显示固定版本，不冒充“全站最新”。按钮“改为跟随最新发布”只允许切换同一 GitHub/GHCR 仓库，且不会立即部署。
-- 查询失败显示“无法确认”，不会拿上一次的 0.8.2 继续显示为最新版。
-
-本项目无法在旧服务器没有可用远程管理通道时，从 GitHub 发布动作直接修改它的宿主机配置；如果旧工具一直读取旧源，这一次宿主机接入仍需服务器面板或云控制台操作。
+---

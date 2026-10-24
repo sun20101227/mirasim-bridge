@@ -101,6 +101,8 @@ server {
 - `rolled_back`：升级失败，已回退。
 - `rollback_failed`：回退未完成；新版可继续读取账号状态并显示具体失败步骤。旧后台锁定的恢复见 [RECOVERY.md](RECOVERY.md)。
 
+如果准备阶段反复失败在**同一处**且每次错误码相同，先看 [升级排障](UPDATE-TROUBLESHOOTING.md)：其中记录了“修复代码装不上去”的引导死锁及其一次性解决办法，无脑重试不会自己好。
+
 升级/回退只使用服务器已配置的发布源，网页不能输入镜像地址或命令。0.8.0 起升级同时更新宿主机工具：镜像内的 `deploy-agent.py`、`panel-host.py` 和网页文件先做语法校验，容器就绪后写入 `/opt/mirasim-deploy` 并备份旧版，最后重启部署服务（页面短暂断开，刷新后重新输入密钥）。回退会一并恢复上一版宿主机工具。状态里的 `host_updated / host_restart / host_restored` 说明这次是否动了宿主机。
 
 ## 4. Google / GitHub 添加新账号
