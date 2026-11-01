@@ -1,5 +1,17 @@
 # 变更记录
 
+## 未发布 — 2026-11-01（wire format 对齐验证）
+- 把官方桌面客户端的签名内核（`cc_sign` / `cc_seal` / `cc_canonical` 的 wasm）原样存入 `lib/vendor/cc.wasm`，新增 `tests/official-wire-format.test.js` 用它做标准答案：canonical 字符串、加密信封、Ed25519 签名三项**逐字节比对通过**，信封内外 header 划分与官方 `RSi`/`Brc` 规则一致。
+- 新增 [WIRE-FORMAT.md](WIRE-FORMAT.md) 记录比对了什么、怎么复现，以及仍未解决的部分：relay 对推理请求仍返回 `401 device_signature (missing_headers)`。已排除 deviceId、credential 来源、5 个客户端版本、call id 位置、meta 补全、改用官方 wasm 签名/封印、以及桌面端实时凭证等因素。
+- 历史流量（`~/.mirasim/traffic/`）显示 claude 请求曾成功 2328 次，最后一次成功为 2026-10-05，之后全部失败——上游行为变化，非本地回归。
+- 验证：273 项 Node 回归（新增 4 项）、66 项 Python、68 项自测、打包 114 文件含 wasm。
+
+## 未发布 — 2026-11-01（wire format 对齐验证）
+- 把官方桌面客户端的签名内核（`cc_sign` / `cc_seal` / `cc_canonical` 的 wasm）原样存入 `lib/vendor/cc.wasm`，新增 `tests/official-wire-format.test.js` 用它做标准答案：canonical 字符串、加密信封、Ed25519 签名三项**逐字节比对通过**，信封内外 header 划分与官方 `RSi`/`Brc` 规则一致。
+- 新增 [WIRE-FORMAT.md](WIRE-FORMAT.md) 记录比对了什么、怎么复现，以及仍未解决的部分：relay 对推理请求仍返回 `401 device_signature (missing_headers)`。已排除 deviceId、credential 来源、5 个客户端版本、call id 位置、meta 补全、改用官方 wasm 签名/封印、以及桌面端实时凭证等因素。
+- 历史流量（`~/.mirasim/traffic/`）显示 claude 请求曾成功 2328 次，最后一次成功为 2026-10-05，之后全部失败——上游行为变化，非本地回归。
+- 验证：273 项 Node 回归（新增 4 项）、66 项 Python、68 项自测、打包 114 文件含 wasm。
+
 ## 0.9.4 — 2026-11-01（空间额度可选、客户端签名对齐）
 - **`/v2` 请求改为与官方客户端完全一致**：只发 `authorization: Bearer <access token>`，不再带 `x-mirasim-*` 签名头。官方实现 `server-main.cjs` 的 `ugn()` 就是这么调的；之前多发的签名头上游虽然接受，但不是它该看到的东西。真实浏览器 + 真实上游验证通过。
 - **网页端可选择用哪个空间的额度**：「运行概览」新增**空间额度**卡片，列出每个空间/机器、余额、当前付费来源，余额非零的空间带「用这个空间的额度」按钮。点击即 `PUT /v2/machines/<node>/credit/mode`，成功后回读账本刷新显示。

@@ -17,6 +17,8 @@ lib/**
 !lib/panel.js
 !lib/roster.js
 !lib/space-credit.js
+!lib/vendor/
+!lib/vendor/**
 !lib/space-credit.js
 !scripts/
 scripts/**

@@ -34,9 +34,9 @@ $sourceFiles = @(
     'lib/membership.js', 'lib/window-keeper.js', 'tests/membership-window.test.js', 'MEMBERSHIP-WINDOWS.md',
     'lib/usage.js', 'tests/usage.test.js', 'USAGE.md', 'tests/gpt-fidelity.test.js',
     'tests/request-body.test.js', 'UPGRADE-0.8.10.md', 'UPGRADE-0.9.0.md',
-    'lib/roster.js', 'lib/space-credit.js', 'tests/space-credit.test.js', 'SPACE-CREDIT.md', 'tests/latest-mirasim.test.js', 'tests/quota-roster.test.js',
+    'lib/roster.js', 'lib/space-credit.js', 'tests/space-credit.test.js', 'SPACE-CREDIT.md', 'WIRE-FORMAT.md', 'tests/latest-mirasim.test.js', 'tests/quota-roster.test.js',
     'tests/design-tokens.test.js', 'tests/a11y-static.test.js', 'tests/reauth.test.js', 'tests/mirasim-adapters.test.js',
-    'tests/local-only.test.js', 'LOCAL-ONLY.md', 'tests/no-duplicate-definitions.test.js', 'tests/no-duplicate-definitions.test.js',
+    'tests/local-only.test.js', 'tests/official-wire-format.test.js', 'tests/helpers/official-core.js', 'lib/vendor/cc.wasm', 'LOCAL-ONLY.md', 'tests/no-duplicate-definitions.test.js',
     'tests/docker-context.test.js',
     'tests/docker-context.test.js'
 )
