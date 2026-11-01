@@ -811,3 +811,34 @@ test('fail() drops the buffer instead of emitting text after an error', () => {
   assert.equal(events.at(-1), 'error');
   assert.equal(out.filter((c) => c.includes('text_delta')).length, 0, 'no text after a failure');
 });
+
+test('the space backend caps in-flight turns below the generic concurrency setting', () => {
+  // A space turn cannot be cancelled: the gateway has no stop frame, so a caller that
+  // walks away still leaves a turn running and billing. The cap is the only defence,
+  // so it must hold even when forward.max_concurrency is raised.
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  cfg.forward.max_concurrency = 8;
+  bridge.validateConfig(cfg);
+  assert.equal(bridge.effectiveConcurrency(cfg), 1, 'default space cap is one turn');
+
+  cfg.space.max_concurrency = 3;
+  bridge.validateConfig(cfg);
+  assert.equal(bridge.effectiveConcurrency(cfg), 3);
+  assert.equal(bridge.effectiveConcurrency(cfg, 'kimi'), 1, 'the Kimi slot is capped by the same value');
+
+  cfg.space.max_concurrency = 32;
+  assert.throws(() => bridge.validateConfig(cfg), /space\.max_concurrency/);
+  cfg.space.max_concurrency = 0;
+  assert.throws(() => bridge.validateConfig(cfg), /space\.max_concurrency/);
+  cfg.space.max_concurrency = 0;
+  assert.throws(() => bridge.validateConfig(cfg), /space\.max_concurrency/);
+
+  cfg.space.max_concurrency = 1;
+  cfg.space.max_concurrency = 1;
+  // The relay backend keeps its own number: this cap is a space property.
+  cfg.backend = 'relay';
+  bridge.validateConfig(cfg);
+  assert.equal(bridge.effectiveConcurrency(cfg), 8);
+});

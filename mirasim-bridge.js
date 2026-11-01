@@ -95,6 +95,10 @@ const DEFAULT_CONFIG = {
     gateway_url: 'wss://relay.mirasim.ai/v2/gateway/ws',
     workdir: '/data/ws',
     turn_timeout_ms: 600000,
+    // A space turn cannot be cancelled (no stop frame in the protocol), so an
+    // abandoned request still bills. Cap in-flight turns below the generic
+    // forward.max_concurrency; raise it only after measuring the space instance.
+    max_concurrency: 1,
   },
   local_only: {
     enabled: false,
@@ -276,6 +280,7 @@ function validateSpaceConfig(sp) {
   if (typeof sp.gateway_url !== 'string' || !/^wss?:\/\//.test(sp.gateway_url)) throw new Error('space.gateway_url 必须是 ws(s):// 地址');
   if (typeof sp.workdir !== 'string' || !sp.workdir) throw new Error('space.workdir 不能为空');
   if (!Number.isInteger(sp.turn_timeout_ms) || sp.turn_timeout_ms < 1000) throw new Error('space.turn_timeout_ms 必须是至少 1000 的整数');
+  if (!Number.isInteger(sp.max_concurrency) || sp.max_concurrency < 1 || sp.max_concurrency > 16) throw new Error('space.max_concurrency 必须是 1-16 的整数');
 }
 
 function validateLocalOnly(lo) {
@@ -371,6 +376,15 @@ function validateConfig(cfg) {
 function effectiveConcurrency(cfg, kind = 'default') {
   const configured = kind === 'kimi' ? cfg.forward.kimi_max_concurrency : cfg.forward.max_concurrency;
   if (cfg.local_only?.enabled && cfg.local_only.single_concurrency) return 1;
+  // A space turn cannot be cancelled: the gateway has no stop frame, so a request the
+  // caller abandoned still runs to completion and still draws on the space ledger.
+  // That makes an over-subscribed space backend strictly worse than an over-subscribed
+  // relay — the abandoned work is billed whether or not anyone is listening. Until the
+  // protocol grows a cancel, the only lever is to refuse the extra work up front.
+  if (cfg.backend === 'space') {
+    const cap = Math.max(1, Number(cfg.space?.max_concurrency) || 1);
+    return Math.min(Math.max(1, configured), cap);
+  }
   return Math.max(1, configured);
 }
 

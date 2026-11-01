@@ -8,6 +8,8 @@
 - 接口：`POST /v1/messages`（支持流式）、`POST /v1/messages/count_tokens`（**本地估算**，不真发回合）、`GET /v1/models`（网关 catalog）、`GET /v1/limits`（`{personal, space}` 双段，失败给 null 不编造）。其余路径 400。
 - 错误映射：空间回 422（模型不支持）→ **400**，不伪装成上游故障，避免 sub2api 把账号判成不健康。`error` 帧与 `session.patch.set.error` 两条路径统一走 `spaceError()` 提取状态码。
 - 模型名不做本地映射：客户端发 `claude-opus-5-5`，空间自己规范化成 `claude-opus-5-5[1m]`；响应的 `model` 用服务端回帧值。
+- 新增 `space.max_concurrency`（默认 1，范围 1–16）：space 回合**在协议层无法取消**，被放弃的请求仍会跑完并扣额度，所以用拒绝任务来兜底。`effectiveConcurrency()` 取它与 `forward.max_concurrency` 的较小值；relay 后端不受影响。
+- 新增 `space.max_concurrency`（默认 1，范围 1–16）：space 回合**在协议层无法取消**，被放弃的请求仍会跑完并扣额度，所以用拒绝任务来兜底。`effectiveConcurrency()` 取它与 `forward.max_concurrency` 的较小值；relay 后端不受影响。
 - 并发必须自限（`queued` 字段实测不可靠）；`sessionKey` 不可复用（`patch` 帧按会话广播、不带 clientRef，复用会混流）。计费落账有 15–60 秒延迟且可能分批，桥接器只报原始快照。
 - 实测不可用的路径已记入文档：`credit/keys` → `403 trial_space`（体验空间不能建密钥）、`/v2/gateway/model/v1/messages` → `401 turn capability missing`、`turn-capability` → `401 machine-auth: key`（需云实例私钥）、`spaceCreditOnly` 被拒、`gatewayModelRoster` 会断连。
 - **真实端到端已验收**（2026-11-01，space-316be）：`GET /v1/models` 200/15 个模型；`GET /v1/limits` 200（personal + space `bal=1057 payer=space`）；`POST /v1/messages/count_tokens` 200/19003（本地估算，不烧额度）；`POST /v1/messages` 流式与非线性均 200，文本 `E2E_LIVE_OK` / `NONSTREAM_OK`，`model` 为服务端回的 `claude-opus-5-5[1m]`；SSE 事件序完整，首事件 2175ms。同轮空间账本 `balance 1057→1047`、`used 193→203`，`payer` 保持 `space`。

@@ -91,7 +91,8 @@ await gateway.runTurn({ …, onUpdate: (field, value) => { if (field === 'model'
     "node_id": "space-316be",
     "gateway_url": "wss://relay.mirasim.ai/v2/gateway/ws",
     "workdir": "/data/ws",
-    "turn_timeout_ms": 600000
+    "turn_timeout_ms": 600000,
+    "max_concurrency": 1
   }
 }
 ```
@@ -227,43 +228,11 @@ socket 不断、回合照常跑到 `phase:done`。
 所以：
 
 - 客户端断开时桥接器**只停止本地等待**（`AbortController`），**不会取消空间里已开始的回合**，该回合仍会跑完并计入额度。
-- 要控制成本，**收紧 `forward.max_concurrency`，而不是靠断开**。
-- 面板 `last_turn.elapsed_ms` 可能显示"用户已断开但回合仍在跑"的时长，这是真实的。
-
-## 用量统计
-
-每个成功回合都写进 `usage` 台账（与 relay 后端同一个 `lib/usage.js`），字段口径：
-
-| 台账字段 | 来源 |
-|---|---|
-| `model` | 请求里的模型 id |
-| `served_model` | 回帧的 `patch.set.model`（首个回合可能不回，此时回落到请求值） |
-| `input_tokens` | `contextUsedTokens` **减去**缓存读写（台账要求三项分开，否则重复计费） |
-| `cache_read_tokens` | `cachedInputTokens` |
-| `usage_state` | 有完整数字时 `complete`，否则 `unknown` |
-
-失败回合同样计入 `ctx.counters.err`、趋势图和延迟统计（`ok:false`），
-所以 p95 包含超时回合，不会系统性偏乐观。
-
-## 优雅退出
-
-space 回合计入 `inflight`，drain 最长等 `space.turn_timeout_ms`（默认 600s），
-但 `shutdown.total_timeout_sec` 默认只有 150s，因此**超时会强制退出**。
-这是有意的：宁可中断等待，也不让进程无限挂着。
-
-## 取消
-
-**协议层没有取消帧。** 客户端→网关的可发帧白名单是
-`netExec / netExecCancel / netFile / netStatus / prompt / subscribe / unsubscribe / ping / netBlobPut / netTaskStart / netThreadRead / netThreadPost`
-——没有 `stop` / `cancel` / `interrupt`（`steer` 是往运行中的回合追加指令，不是取消）。
-
-实测：回合进行中依次发 `{"type":"stop"}`、`{"type":"stop",sessionKey}`、`{"type":"cancel"}`、`{"type":"interrupt"}`，
-socket 不断、回合照常跑到 `phase:done`。
-
-所以：
-
-- 客户端断开时桥接器**只停止本地等待**（`AbortController`），**不会取消空间里已开始的回合**，该回合仍会跑完并计入额度。
-- 要控制成本，**收紧 `forward.max_concurrency`，而不是靠断开**。
+- 因此 space 后端有独立的并发上限 **`space.max_concurrency`（默认 1，范围 1–16）**：
+  `effectiveConcurrency()` 取它与 `forward.max_concurrency` 的较小值。拒绝任务比事后
+  取消更早、也更确定。
+- 调高之前先测那个空间实例：`turn_timeout_ms` 默认 600 秒，一个卡住的回合会占满
+  一个槽位整整十分钟。
 - 面板 `last_turn.elapsed_ms` 可能显示"用户已断开但回合仍在跑"的时长，这是真实的。
 
 ## 用量统计
