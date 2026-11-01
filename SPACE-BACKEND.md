@@ -218,12 +218,21 @@ const v2Post = route === '/v2/gateway/session' && method === 'POST';
 
 ## 取消
 
-**协议层没有取消帧。** 客户端→网关的可发帧白名单是
-`netExec / netExecCancel / netFile / netStatus / prompt / subscribe / unsubscribe / ping / netBlobPut / netTaskStart / netThreadRead / netThreadPost`
-——没有 `stop` / `cancel` / `interrupt`（`steer` 是往运行中的回合追加指令，不是取消）。
+**`stop` 帧存在，但对云空间回合无效。**
 
-实测：回合进行中依次发 `{"type":"stop"}`、`{"type":"stop",sessionKey}`、`{"type":"cancel"}`、`{"type":"interrupt"}`，
-socket 不断、回合照常跑到 `phase:done`。
+客户端可发帧里有 `stop`（`{"type":"stop","sessionKey":"claude:…","taskId":"…"}`），
+host 端也确实有处理分支 `case "stop": this["io"]["stop"](sessionKey)`。但它操作的是
+**本机 loom 进程**，云空间里跑的是容器内的 agent，不受这个调用影响。
+
+三次实测（生成中途发 stop，带与不带 `taskId` 都试过）：
+
+| 发出时机 | 结果 |
+|---|---|
+| 生成 262 字符后 | 0.3s 后 `phase:done`，字符数 262 → 324，仍在增长 |
+| 生成 20 字符后 | 回合继续，`phase:done` 正常收尾 |
+| 排队阶段 | 无 ack，后续无 phase 更新 |
+
+**没有任何一次收到 `stopped` phase 或 stop 的 ack。** 结论：`stop` 不能省下空间额度。
 
 所以：
 
