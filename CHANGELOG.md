@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.9.6 — 2026-11-01（空间会话复用）
+- **新增 `space.session_reuse`（默认 false）**：开启后复用上一个回合的 `sessionKey`，只付一次约 19k tokens 的 agent 基线。代价是上下文跨请求累积，只在「每个请求都是同一个人」的单用户部署里开启。
+- 安全阀：`effectiveConcurrency(cfg) > 1` 时自动退回 `sessionKey: null`。host 按 sessionKey 广播 patch 帧且不带 clientRef，两个并发回合共用一个会话会互相收到对方文本（实测出现过 `"AB"+"CD"` 混流），所以复用与并发互斥。
+- 新增回归 2 项：开关语义、并发时自动退回、非法值校验、记忆只在开启时生效。
+
+## 0.9.6 — 2026-11-01（空间会话复用）
+- **新增 `space.session_reuse`（默认 false）**：开启后复用上一个回合的 `sessionKey`，只付一次约 19k tokens 的 agent 基线。代价是上下文跨请求累积，只在「每个请求都是同一个人」的单用户部署里开启。
+- 安全阀：`effectiveConcurrency(cfg) > 1` 时自动退回 `sessionKey: null`。host 按 sessionKey 广播 patch 帧且不带 clientRef，两个并发回合共用一个会话会互相收到对方文本（实测出现过 `"AB"+"CD"` 混流），所以复用与并发互斥。
+- 新增回归 2 项：开关语义、并发时自动退回、非法值校验、记忆只在开启时生效。
+
 ## 0.9.5 — 2026-11-01（空间后端：用空间额度跑 Claude）
 
 - **新增 `backend: "space"`**：把 Anthropic `/v1/messages` 翻译成**云空间里的一次 agent 回合**，费用从空间额度扣。这是继 `session`、`relay` 之后的第三个后端，配置见 `space: { node_id, gateway_url, workdir, turn_timeout_ms }`。详见 [空间后端](SPACE-BACKEND.md)。

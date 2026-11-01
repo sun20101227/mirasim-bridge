@@ -32,7 +32,7 @@ const spaceMessages = require('./lib/space-messages');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.9.5';
+const VERSION = '0.9.6';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -99,6 +99,11 @@ const DEFAULT_CONFIG = {
     // abandoned request still bills. Cap in-flight turns below the generic
     // forward.max_concurrency; raise it only after measuring the space instance.
     max_concurrency: 1,
+    // Reuse one agent session across requests to skip the ~19k-token baseline.
+    // Off by default: a shared session mixes one caller's context into the next,
+    // and there is no caller identity on /v1/messages to key a session by. Enable
+    // only for a single-user deployment where every request is the same person.
+    session_reuse: false,
   },
   local_only: {
     enabled: false,
@@ -281,6 +286,7 @@ function validateSpaceConfig(sp) {
   if (typeof sp.workdir !== 'string' || !sp.workdir) throw new Error('space.workdir 不能为空');
   if (!Number.isInteger(sp.turn_timeout_ms) || sp.turn_timeout_ms < 1000) throw new Error('space.turn_timeout_ms 必须是至少 1000 的整数');
   if (!Number.isInteger(sp.max_concurrency) || sp.max_concurrency < 1 || sp.max_concurrency > 16) throw new Error('space.max_concurrency 必须是 1-16 的整数');
+  if (typeof sp.session_reuse !== 'boolean') throw new Error('space.session_reuse 必须是布尔值');
 }
 
 function validateLocalOnly(lo) {
@@ -2674,6 +2680,7 @@ async function handleSpaceProxy(req, res, cfg, ctx, gateway) {
 
       const turn = await gateway.runTurn({
         prompt, model: requested, signal: controller.signal,
+        sessionKey: spaceSessionKey(cfg, ctx),
         onDelta: (t) => stream.delta(t),
         onUpdate: (field, value) => {
           // message_start 用服务端回的模型名；并且一进入 streaming 就开流，
@@ -2686,14 +2693,16 @@ async function handleSpaceProxy(req, res, cfg, ctx, gateway) {
       stopHeartbeat();
       ctx.counters.ok++;
       ctx.lastUpstreamOkAt = Date.now();
+      rememberSpaceSession(cfg, ctx, turn);
       recordSpaceTurn(ctx, turn, startedAt);
       recordSpaceUsage(cfg, ctx, { requested, turn, startedAt, status: 200 });
       return res.end();
     }
 
-    const turn = await gateway.runTurn({ prompt, model: requested, signal: controller.signal });
+    const turn = await gateway.runTurn({ prompt, model: requested, signal: controller.signal, sessionKey: spaceSessionKey(cfg, ctx) });
     ctx.counters.ok++;
     ctx.lastUpstreamOkAt = Date.now();
+    rememberSpaceSession(cfg, ctx, turn);
     recordSpaceTurn(ctx, turn, startedAt);
     recordSpaceUsage(cfg, ctx, { requested, turn, startedAt, status: 200 });
     const payload = JSON.stringify(spaceMessages.toMessage(turn, requested));
@@ -2732,6 +2741,29 @@ async function handleSpaceProxy(req, res, cfg, ctx, gateway) {
 
 /** Agent 自身 system prompt + 工具定义的实测基线（18877–20155），用于 count_tokens 估算。 */
 const SPACE_AGENT_BASELINE_TOKENS = 19000;
+
+/**
+ * The sessionKey to run the next turn on.
+ *
+ * With `space.session_reuse` off this is always null: every request starts a clean
+ * agent session, so ~19k tokens of the agent's own prompt are paid each time but no
+ * caller's context can leak into another's. Turning it on keeps one session alive so
+ * the baseline is paid once — correct only when every request is the same person,
+ * which is why it is opt-in and why `space.max_concurrency` (default 1) must stay at
+ * one: two turns sharing a session receive each other's patch frames, since the host
+ * broadcasts patches per sessionKey without a clientRef.
+ */
+function spaceSessionKey(cfg, ctx) {
+  if (!cfg.space.session_reuse) return null;
+  if (effectiveConcurrency(cfg) > 1) return null;   // reuse and parallelism are incompatible
+  return ctx.space?.reuseSessionKey || null;
+}
+
+function rememberSpaceSession(cfg, ctx, turn) {
+  if (!cfg.space.session_reuse || !turn?.sessionKey) return;
+  ctx.space ||= {};
+  ctx.space.reuseSessionKey = turn.sessionKey;
+}
 
 function recordSpaceTurn(ctx, turn, startedAt) {
   bumpHistory(ctx, 'ok');
@@ -4742,6 +4774,6 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
   getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest,
   fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId,
-  getSpaceGateway, usesRelayApi, validateSpaceConfig, SPACE_AGENT_BASELINE_TOKENS,
+  getSpaceGateway, usesRelayApi, spaceSessionKey, rememberSpaceSession, validateSpaceConfig, SPACE_AGENT_BASELINE_TOKENS,
   effectiveConcurrency, effectiveInterval, upstreamConcurrency, validateLocalOnly,
   summarizeCredit, summarizeNodes, isNodeId, fetchSpaceCredit, spaceCreditPath, setSpacePool, SPACE_POOLS };

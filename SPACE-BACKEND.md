@@ -92,7 +92,8 @@ await gateway.runTurn({ …, onUpdate: (field, value) => { if (field === 'model'
     "gateway_url": "wss://relay.mirasim.ai/v2/gateway/ws",
     "workdir": "/data/ws",
     "turn_timeout_ms": 600000,
-    "max_concurrency": 1
+    "max_concurrency": 1,
+    "session_reuse": false
   }
 }
 ```
@@ -121,6 +122,20 @@ await gateway.runTurn({ …, onUpdate: (field, value) => { if (field === 'model'
 - 不同 `clientRef` + `sessionKey: null` → 各自独立会话，**真并行、不串流**
 - **`queued` 字段不可靠**（实测空闲时恒为 `false`），不要用它做背压
 - 并发上限必须自己限，用 `forward.max_concurrency`
+
+## 会话复用（省基线）
+
+`space.session_reuse`（默认 **false**）开启后，桥接器记住上一个回合的 `sessionKey`，
+下一次请求复用它，从而**只付一次 ~19k 的 agent 基线**。
+
+代价与前提：
+
+- 同一会话的上下文会跨请求累积，**上一个调用方的内容会进入下一个调用方的上下文**。
+  只在「每个请求都是同一个人」的单用户部署里开启。
+- `effectiveConcurrency(cfg) > 1` 时**自动退回 `sessionKey: null`**：host 按 sessionKey
+  广播 patch 帧、不带 clientRef，两个并发回合共用一个会话会互相收到对方的文本
+  （实测出现过 `"ALPHABETA"` 这种混流）。所以就绪条件是 `max_concurrency = 1`。
+- 复用不改任何计费口径，只是省掉重复的基线 tokens。
 
 ## 会话与上下文
 

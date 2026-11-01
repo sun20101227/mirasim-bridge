@@ -866,3 +866,77 @@ test('aborting a turn sends stop for that task before giving up locally', async 
     gw.close();
   });
 });
+
+test('session reuse is off by default and refused when turns could run in parallel', () => {
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  bridge.validateConfig(cfg);
+  const ctx = bridge.newAccountCtx('main');
+
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'default is a clean session per request');
+  ctx.space = { reuseSessionKey: 'claude:keep' };
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'a stale key is ignored while reuse is off');
+
+  cfg.space.session_reuse = true;
+  bridge.validateConfig(cfg);
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), 'claude:keep', 'reuse returns the remembered session');
+
+  // Two turns sharing a session receive each other's patch frames: the host
+  // broadcasts per sessionKey with no clientRef, so reuse and parallelism cannot
+  // coexist. Raising the cap must silently disable reuse rather than mix streams.
+  cfg.space.max_concurrency = 2;
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'reuse is dropped when concurrency allows overlap');
+
+  cfg.space.session_reuse = 'yes';
+  assert.throws(() => bridge.validateConfig(cfg), /space\.session_reuse/);
+});
+
+test('a finished turn is remembered for reuse only when the feature is on', () => {
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  const ctx = bridge.newAccountCtx('main');
+  bridge.rememberSpaceSession(cfg, ctx, { sessionKey: 'claude:abc' });
+  assert.equal(ctx.space?.reuseSessionKey, undefined, 'nothing is remembered while reuse is off');
+  cfg.space.session_reuse = true;
+  bridge.rememberSpaceSession(cfg, ctx, { sessionKey: 'claude:abc' });
+  assert.equal(ctx.space.reuseSessionKey, 'claude:abc');
+});
+
+test('session reuse is off by default and refused when turns could run in parallel', () => {
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  bridge.validateConfig(cfg);
+  const ctx = bridge.newAccountCtx('main');
+
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'default is a clean session per request');
+  ctx.space = { reuseSessionKey: 'claude:keep' };
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'a stale key is ignored while reuse is off');
+
+  cfg.space.session_reuse = true;
+  bridge.validateConfig(cfg);
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), 'claude:keep', 'reuse returns the remembered session');
+
+  // Two turns sharing a session receive each other's patch frames: the host
+  // broadcasts per sessionKey with no clientRef, so reuse and parallelism cannot
+  // coexist. Raising the cap must silently disable reuse rather than mix streams.
+  cfg.space.max_concurrency = 2;
+  assert.equal(bridge.spaceSessionKey(cfg, ctx), null, 'reuse is dropped when concurrency allows overlap');
+
+  cfg.space.session_reuse = 'yes';
+  assert.throws(() => bridge.validateConfig(cfg), /space\.session_reuse/);
+});
+
+test('a finished turn is remembered for reuse only when the feature is on', () => {
+  const cfg = bridge.deepMerge({}, bridge.DEFAULT_CONFIG);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  const ctx = bridge.newAccountCtx('main');
+  bridge.rememberSpaceSession(cfg, ctx, { sessionKey: 'claude:abc' });
+  assert.equal(ctx.space?.reuseSessionKey, undefined, 'nothing is remembered while reuse is off');
+  cfg.space.session_reuse = true;
+  bridge.rememberSpaceSession(cfg, ctx, { sessionKey: 'claude:abc' });
+  assert.equal(ctx.space.reuseSessionKey, 'claude:abc');
+});
