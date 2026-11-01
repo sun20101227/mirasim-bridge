@@ -26,10 +26,11 @@ const { normalizeResponses, aggregateResponses } = require('./lib/responses');
 const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { summarizeMembership } = require('./lib/membership');
 const { summarizeRoster, rosterIds, modelInfo } = require('./lib/roster');
+const { summarizeCredit, summarizeNodes, isNodeId } = require('./lib/space-credit');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
-const VERSION = '0.9.2';
+const VERSION = '0.9.4';
 const IS_WIN = process.platform === 'win32';
 
 /**
@@ -1618,6 +1619,72 @@ function classifyUpstreamFailure(status, headers = {}, body = '') {
 const ROSTER_TTL_MS = 10 * 60 * 1000;
 
 /**
+ * Mirasim space credit routes, or null when the path is not one of them.
+ *
+ *   GET /v2/machines                        → every node this account can see
+ *   GET /v2/machines/member-seats           → the spaces/machines with seats
+ *   GET /v2/machines/<nodeId>/credit        → that node's credit ledger
+ *
+ * These are NOT part of /v1 and do not take the signed/sealed headers; the relay
+ * authenticates them with the access token alone. Only node ids the API itself
+ * emits are accepted, so the bridge cannot be used as an arbitrary-path proxy.
+ */
+const SPACE_CREDIT_ROUTES = ['/v2/machines', '/v2/machines/member-seats', '/v2/machines/seats'];
+function spaceCreditPath(wirePath) {
+  if (SPACE_CREDIT_ROUTES.includes(wirePath)) return { kind: wirePath === '/v2/machines' ? 'machines' : 'seats' };
+  const m = wirePath.match(/^\/v2\/machines\/([^/]+)\/credit$/);
+  if (!m || !isNodeId(m[1])) return null;   // encoded traversal must not become a proxy path
+  return { kind: 'credit', nodeId: m[1] };
+}
+
+// Space credit changes only when someone funds or spends a pool; a short cache keeps
+// a polling caller from hammering the relay, which is the same reason /v1/limits is
+// sampled rather than asked per request.
+const SPACE_CREDIT_TTL_MS = 60 * 1000;
+
+/** Upstream space-credit GET. Returns { status, body } and never throws on a refusal. */
+async function fetchSpaceCredit(cfg, pathname, { timeoutMs = 15000 } = {}) {
+  if (cfg.backend !== 'relay') throw Error('space credit 需要 backend=relay');
+  const response = await getRelay(cfg).request({ path: pathname, signal: AbortSignal.timeout(timeoutMs) });
+  const raw = await readStreamText(response);
+  return { status: response.statusCode, body: raw, headers: response.headers };
+}
+
+/**
+ * Choose which pool pays for one node.
+ *
+ *   mode    — "space" runs the space's shared pool; "personal" always bills the user.
+ *   prefer  — which pool to fall back to when the other cannot pay.
+ *
+ * Mirasim models these as two separate PUTs (`.../mode`, `.../prefer`), so switching
+ * to a funded space means setting mode=space. Both are money-adjacent, so the bridge
+ * forwards them only when the console asks explicitly; nothing calls them on a timer.
+ */
+const SPACE_POOLS = new Set(['space', 'personal']);
+async function setSpacePool(cfg, nodeId, { mode, prefer }, { timeoutMs = 15000 } = {}) {
+  if (cfg.backend !== 'relay') throw Error('space credit 需要 backend=relay');
+  if (!isNodeId(nodeId)) throw Error('节点 ID 无效');
+  if (mode !== undefined && !SPACE_POOLS.has(mode)) throw Error('mode 只能是 space 或 personal');
+  if (prefer !== undefined && !SPACE_POOLS.has(prefer)) throw Error('prefer 只能是 space 或 personal');
+  if (mode === undefined && prefer === undefined) throw Error('需要 mode 或 prefer');
+  const out = {};
+  for (const [field, value] of [['mode', mode], ['prefer', prefer]]) {
+    if (value === undefined) continue;
+    const payload = Buffer.from(JSON.stringify({ [field]: value }));
+    const response = await getRelay(cfg).request({
+      path: `/v2/machines/${nodeId}/credit/${field}`, method: 'PUT', body: payload,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const raw = await readStreamText(response);
+    if (response.statusCode !== 200 && response.statusCode !== 204) {
+      throw Error(`切换 ${field} 失败（HTTP ${response.statusCode}）`);
+    }
+    out[field] = value;
+  }
+  return out;
+}
+
+/**
  * /v1/model-roster is the relay's own routing table. It keeps answering 200 with
  * the credential while /v1/models is refused for exhausted shared quota, so it is
  * both a fallback model list and proof that reachability is fine.
@@ -2493,11 +2560,16 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   // strict pass-through: the caller's body is forwarded byte-for-byte and the reply is
   // streamed back verbatim. No Messages/Responses translation happens here.
   const isChatCompletions = wirePath === '/v1/chat/completions';
+  let spaceRoute = null;   // set below when this is a /v2 space-credit read
   if (target.relay) {
     const control = ['/v1/models', '/v1/limits', '/v1/model-roster'].includes(wirePath);
-    if (!(control ? req.method === 'GET'
+    // Space credit lives outside /v1: /v2/machines[/<node>][/credit] and /v2/machines/member-seats.
+    // Read-only, access-token authenticated, never signed or sealed.
+    const isSpaceCredit = spaceCreditPath(wirePath) !== null;
+    spaceRoute = spaceCreditPath(wirePath);
+    if (!(control || isSpaceCredit ? req.method === 'GET'
         : req.method === 'POST' && (isResponses || isChatCompletions || ['/v1/messages', '/v1/messages/count_tokens'].includes(wirePath)))) {
-      return fail400(res, { message: '直连模式支持 Messages、GPT Responses/compact、Chat Completions（透传），以及 models/limits/model-roster' });
+      return fail400(res, { message: '直连模式支持 Messages、GPT Responses/compact、Chat Completions（透传），以及 models/limits/model-roster/space-credit' });
     }
     // Match the signed path exactly, including requests ending with a slash.
     upstreamPath = wirePath + (req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : '');
@@ -2699,6 +2771,45 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
     return;
   }
 
+  // --- /v2 space credit：按节点返回额度，只读 ---
+  // 归一化后返回，不把上游原始字段名泄漏给调用方，也不隐藏我们读不懂的部分：
+  // unknown 字段直接丢弃，绝不编造数值。
+  if (req.method === 'GET' && spaceRoute) {
+    const text = await readStreamText(upRes);
+    if (status !== 200) {
+      countErr();
+      const buf = Buffer.from(text, 'utf8');
+      res.writeHead(status, mergedHeaders(upRes.headers, { 'content-type': 'application/json; charset=utf-8', 'content-length': buf.length }));
+      return res.end(buf);
+    }
+    try {
+      let out;
+      if (spaceRoute.kind === 'seats') {
+        out = { source: 'Mirasim /v2/machines/member-seats', observed_at: new Date().toISOString(), spaces: summarizeNodes(JSON.parse(text)) };
+      } else if (spaceRoute.kind === 'machines') {
+        const parsed = JSON.parse(text);
+        out = { source: 'Mirasim /v2/machines', observed_at: new Date().toISOString(),
+          machines: (isPlainObject(parsed) && Array.isArray(parsed.machines) ? parsed.machines : [])
+            .filter((m) => isPlainObject(m) && typeof m.nodeId === 'string')
+            .map((m) => ({ node_id: m.nodeId, name: typeof m.name === 'string' ? m.name.slice(0, 128) : null,
+              platform: typeof m.platform === 'string' ? m.platform : null, online: m.online === true,
+              app_version: typeof m.appVersion === 'string' ? m.appVersion.slice(0, 32) : null })) };
+      } else {
+        out = { source: 'Mirasim /v2/machines/<node>/credit', observed_at: new Date().toISOString(), credit: summarizeCredit(JSON.parse(text)) };
+      }
+      const buf = Buffer.from(JSON.stringify(out, null, 2) + '\n', 'utf8');
+      countOk();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': buf.length, 'cache-control': 'no-store' });
+      return res.end(buf);
+    } catch (err) {
+      countErr();
+      return fail503(res, `invalid space credit response: ${err.message}`);
+    }
+  }
+
+  // --- /v2 space credit：按节点返回额度，只读 ---
+  // 归一化后返回，不把上游原始字段名泄漏给调用方，也不隐藏我们读不懂的部分：
+  // unknown 字段直接丢弃，绝不编造数值。
   if (status === 200 && wirePath === '/v1/responses' && !responsesStream) {
     const raw = await readStreamText(upRes);
     // Observe the upstream frames even when aggregation fails or the model is refused.
@@ -4304,6 +4415,18 @@ async function main() {
       process.stdout.write(JSON.stringify(args.flags.raw ? JSON.parse(result.raw) : summarizeLimits(JSON.parse(result.raw)), null, 2) + '\n');
       return;
     }
+    case 'space-credit': {
+      if (cfg.backend !== 'relay') throw new Error('space-credit 需要 backend=relay');
+      const target = String(args.flags.node || args._[1] || '').trim();
+      const p = target ? (isNodeId(target) ? `/v2/machines/${target}/credit` : null) : '/v2/machines/member-seats';
+      if (!p) throw new Error('节点 ID 无效（需要 pc-…/space-…/alloc_…）；留空则列出全部空间');
+      const res = await fetchSpaceCredit(cfg, p);
+      if (res.status !== 200) throw new Error(`额度查询 HTTP ${res.status}（未发起推理请求）`);
+      const parsed = JSON.parse(res.body);
+      const out = target ? summarizeCredit(parsed) : { source: 'Mirasim /v2/machines/member-seats', spaces: summarizeNodes(parsed) };
+      process.stdout.write(JSON.stringify(args.flags.raw ? parsed : out, null, 2) + '\n');
+      return;
+    }
     case 'serve':
       return cmdServe(cfg, args);
     case 'groups':
@@ -4328,4 +4451,5 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
   getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest,
   fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId,
-  effectiveConcurrency, effectiveInterval, upstreamConcurrency, validateLocalOnly };
+  effectiveConcurrency, effectiveInterval, upstreamConcurrency, validateLocalOnly,
+  summarizeCredit, summarizeNodes, isNodeId, fetchSpaceCredit, spaceCreditPath, setSpacePool, SPACE_POOLS };

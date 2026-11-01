@@ -1,6 +1,14 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.2**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.4**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**0.9.4**：空间额度可在网页端选择——「运行概览」新增空间额度卡片，列出每个空间/机器的余额与当前付费来源，一键把有余额的空间设为付费来源。`/v2` 请求改为只发 access token，与官方客户端的调用方式一致。见 [空间额度说明](SPACE-CREDIT.md)。
+
+**0.9.4**：空间额度可在网页端选择——「运行概览」新增空间额度卡片，列出每个空间/机器的余额与当前付费来源，一键把有余额的空间设为付费来源。`/v2` 请求改为只发 access token，与官方客户端的调用方式一致。见 [空间额度说明](SPACE-CREDIT.md)。
+
+**0.9.3**：新增**空间额度**接口——Mirasim 的 `/v1/limits` 只报个人额度、不认空间；真正的空间账本在 `/v2/machines/<nodeId>/credit`，桥接器现在以 `bridge_secret` 鉴权透出（`/v2/machines`、`/v2/machines/member-seats`、`/v2/machines/<nodeId>/credit`），并提供 `space-credit` 命令。见 [空间额度说明](SPACE-CREDIT.md)。
+
+**0.9.3**：新增**空间额度**接口——Mirasim 的 `/v1/limits` 只报个人额度、不认空间；真正的空间账本在 `/v2/machines/<nodeId>/credit`，桥接器现在以 `bridge_secret` 鉴权透出（`/v2/machines`、`/v2/machines/member-seats`、`/v2/machines/<nodeId>/credit`），并提供 `space-credit` 命令。见 [空间额度说明](SPACE-CREDIT.md)。
 
 **0.9.2**：新增 `local_only` 单账号自用形态（默认关闭）：把同一账号的在途请求压到 1、空闲期不再每 tick 探测上游、额度/会员后台轮询拉长。修复「登录状态」卡片报 `Unknown operation`（宿主机与容器两层操作白名单都漏了 `reauth`）；修复注册到 sub2api 的并发与本地闸门可能不一致。见 [变更记录](CHANGELOG.md) · [降低暴露面说明](LOCAL-ONLY.md)。
 

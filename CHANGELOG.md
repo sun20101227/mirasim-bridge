@@ -1,5 +1,43 @@
 # 变更记录
 
+## 0.9.4 — 2026-11-01（空间额度可选、客户端签名对齐）
+- **`/v2` 请求改为与官方客户端完全一致**：只发 `authorization: Bearer <access token>`，不再带 `x-mirasim-*` 签名头。官方实现 `server-main.cjs` 的 `ugn()` 就是这么调的；之前多发的签名头上游虽然接受，但不是它该看到的东西。真实浏览器 + 真实上游验证通过。
+- **网页端可选择用哪个空间的额度**：「运行概览」新增**空间额度**卡片，列出每个空间/机器、余额、当前付费来源，余额非零的空间带「用这个空间的额度」按钮。点击即 `PUT /v2/machines/<node>/credit/mode`，成功后回读账本刷新显示。
+- 新增 `space-pool` 管理操作（写），必须带 `confirm: true`；`panel-host.py` 里只进 `OPERATIONS` 不进 `READ_OPERATIONS`，会参与升级/OAuth 互斥。
+- `RelayClient` 现在只放行 `/v2` 的两个写路由（`mode`、`prefer`）；`transfers`、`caps` 等仍然拒绝——它们直接转移余额。
+- 空间列表一次性返回每个节点的余额（并行读取）；单个节点读失败时该行标 `balance: null` + 原因，不影响其他行。
+- 顺手清掉三处既有重复：`web/app.js` 里重复的 `check-reauth` 监听器、`spaceCard()` 调用与刷新按钮绑定，以及 `web/index.html` 里重复的空间额度卡片（编辑工具反复落盘导致，均已被 `no-duplicate-definitions` 门禁之外的人工核对发现）。
+- 验证：269 项 Node 回归（新增 4 项：`/v2` 只带 token、只放行两个写路由、`confirm` 强制、列表降级）、66 项 Python、68 项自测；真实 Chromium 打开面板确认卡片渲染与登录态正常。
+
+## 0.9.4 — 2026-11-01（空间额度可选、客户端签名对齐）
+- **`/v2` 请求改为与官方客户端完全一致**：只发 `authorization: Bearer <access token>`，不再带 `x-mirasim-*` 签名头。官方实现 `server-main.cjs` 的 `ugn()` 就是这么调的；之前多发的签名头上游虽然接受，但不是它该看到的东西。真实浏览器 + 真实上游验证通过。
+- **网页端可选择用哪个空间的额度**：「运行概览」新增**空间额度**卡片，列出每个空间/机器、余额、当前付费来源，余额非零的空间带「用这个空间的额度」按钮。点击即 `PUT /v2/machines/<node>/credit/mode`，成功后回读账本刷新显示。
+- 新增 `space-pool` 管理操作（写），必须带 `confirm: true`；`panel-host.py` 里只进 `OPERATIONS` 不进 `READ_OPERATIONS`，会参与升级/OAuth 互斥。
+- `RelayClient` 现在只放行 `/v2` 的两个写路由（`mode`、`prefer`）；`transfers`、`caps` 等仍然拒绝——它们直接转移余额。
+- 空间列表一次性返回每个节点的余额（并行读取）；单个节点读失败时该行标 `balance: null` + 原因，不影响其他行。
+- 顺手清掉三处既有重复：`web/app.js` 里重复的 `check-reauth` 监听器、`spaceCard()` 调用与刷新按钮绑定，以及 `web/index.html` 里重复的空间额度卡片（编辑工具反复落盘导致，均已被 `no-duplicate-definitions` 门禁之外的人工核对发现）。
+- 验证：269 项 Node 回归（新增 4 项：`/v2` 只带 token、只放行两个写路由、`confirm` 强制、列表降级）、66 项 Python、68 项自测；真实 Chromium 打开面板确认卡片渲染与登录态正常。
+
+## 0.9.3 — 2026-10-31（空间额度）
+- **新增空间额度接口**。Mirasim 有两套额度，`/v1/limits` 只报 personal（`subject: usr_…`），**完全不认空间维度**——实测 `?space=` 和 `x-mirasim-space` 都被忽略。真正的空间账本在 `GET /v2/machines/<nodeId>/credit`，用 access token 鉴权、不需要签名或加密信封。
+- 桥接器新增三个只读接口，均要求 `bridge_secret`：`GET /v2/machines`（可见机器/空间）、`GET /v2/machines/member-seats`（座位与归属）、`GET /v2/machines/<nodeId>/credit`（单节点额度）。只放行 GET。
+- 新增 `lib/space-credit.js` 归一化上游响应：`space_funded` 区分「空间池有额度」与「机器余额非零」，`payer` 标出从哪套额度扣费，`empty_reason: space_empty` 表示空间未充值（正常状态，不是错误）。未知字段丢弃，不编造数值。
+- 新增 CLI：`space-credit [nodeId] [--raw]`。
+- 新增管理端操作 `space-credit`（`{account?, node?}`），宿主机与容器两层白名单同步放行，按只读操作处理。
+- 安全性：`nodeId` 只接受 `pc-…`/`space-…`/`alloc_…` 形状，且**先做百分号解码再校验**——测试发现 `a%2F..%2Fb` 原本能绕成正则合法值，已修复并加回归，防止桥接器变成任意路径代理。
+- 边界：不提供充值、转账、改 payer、改上限；`can.toggle`/`can.set_caps`/`can.transfer` 仅作为上游事实透出。详见 [空间额度说明](SPACE-CREDIT.md)。
+- 验证：261 项 Node 回归（新增 8 项）、66 项 Python 测试、68 项自测通过；对 `relay.mirasim.ai` 实测确认 `/v1/limits` 忽略空间参数、`space-316be` 账本返回 `balance 1182 / funded 1250 / used 68`、空空间返回 `space_empty`。
+
+## 0.9.3 — 2026-10-31（空间额度）
+- **新增空间额度接口**。Mirasim 有两套额度，`/v1/limits` 只报 personal（`subject: usr_…`），**完全不认空间维度**——实测 `?space=` 和 `x-mirasim-space` 都被忽略。真正的空间账本在 `GET /v2/machines/<nodeId>/credit`，用 access token 鉴权、不需要签名或加密信封。
+- 桥接器新增三个只读接口，均要求 `bridge_secret`：`GET /v2/machines`（可见机器/空间）、`GET /v2/machines/member-seats`（座位与归属）、`GET /v2/machines/<nodeId>/credit`（单节点额度）。只放行 GET。
+- 新增 `lib/space-credit.js` 归一化上游响应：`space_funded` 区分「空间池有额度」与「机器余额非零」，`payer` 标出从哪套额度扣费，`empty_reason: space_empty` 表示空间未充值（正常状态，不是错误）。未知字段丢弃，不编造数值。
+- 新增 CLI：`space-credit [nodeId] [--raw]`。
+- 新增管理端操作 `space-credit`（`{account?, node?}`），宿主机与容器两层白名单同步放行，按只读操作处理。
+- 安全性：`nodeId` 只接受 `pc-…`/`space-…`/`alloc_…` 形状，且**先做百分号解码再校验**——测试发现 `a%2F..%2Fb` 原本能绕成正则合法值，已修复并加回归，防止桥接器变成任意路径代理。
+- 边界：不提供充值、转账、改 payer、改上限；`can.toggle`/`can.set_caps`/`can.transfer` 仅作为上游事实透出。详见 [空间额度说明](SPACE-CREDIT.md)。
+- 验证：261 项 Node 回归（新增 8 项）、66 项 Python 测试、68 项自测通过；对 `relay.mirasim.ai` 实测确认 `/v1/limits` 忽略空间参数、`space-316be` 账本返回 `balance 1182 / funded 1250 / used 68`、空空间返回 `space_empty`。
+
 ## 0.9.2 — 2026-10-24（local_only）
 - 新增 `local_only` 单账号自用形态（默认关闭，升级不改变现有行为）：`single_concurrency` 把同一账号的在途推理请求压到 1 个；`idle_probe` 让健康循环在空闲期不再每 tick 发一次 `GET /v1/models`，只在超过 `idle_liveness_sec` 没有任何上游交互时探一次；额度/会员后台轮询下限拉长到 `quota_min_interval_sec` / `membership_min_interval_sec`。
 - 静默不会掩盖故障：只有「上一次已知健康」时才跳过探测；不健康、或健康状态未知时照常探测。真实请求成功或失败都会重置静默计时；`/__status` 与账号摘要新增 `local_only` / `effective_concurrency`，页面不会再显示 3 而实际只放 1 个。

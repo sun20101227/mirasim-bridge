@@ -16,7 +16,8 @@ lib/**
 !lib/usage.js
 !lib/panel.js
 !lib/roster.js
-!lib/roster.js
+!lib/space-credit.js
+!lib/space-credit.js
 !scripts/
 scripts/**
 !scripts/deployment.js

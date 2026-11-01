@@ -603,6 +603,74 @@ function renderGptRequest(data) {
   });
 }
 
+/**
+ * Space credit: every node Mirasim exposes, its balance, and which pool currently
+ * pays. The personal ledger is a separate card above; this one is the only place a
+ * space balance appears, because /v1/limits does not know about spaces at all.
+ */
+let spacesCache = { at: 0, key: '' };
+async function spaceCard(force = false) {
+  const scope = { ...selected };
+  const key = identity(scope);
+  if (!force && spacesCache.key === key && Date.now() - spacesCache.at < 30000) return;
+  const box = $('spaces'); if (!box) return;
+  let data;
+  try { data = await api('space-credit', scoped({}, scope), scope.target); }
+  catch (err) {
+    if (!sameAccount(scope)) return;
+    box.replaceChildren(empty(err.message.includes('relay') ? '空间额度需要 relay 后端' : `读取失败：${err.message}`));
+    return;
+  }
+  if (!sameAccount(scope)) return;
+  spacesCache = { at: Date.now(), key };
+  $('space-time').textContent = `读取于 ${new Date().toLocaleTimeString()}`;
+  const rows = data.spaces || [];
+  if (!rows.length) { box.replaceChildren(empty('这个账号没有可见的空间或机器')); return; }
+  box.replaceChildren(...rows.map((row) => {
+    const c = row.credit || {};
+    const card = node('div', '', 'space-row');
+    card.dataset.funded = c.space_funded ? 'yes' : 'no';
+    const head = node('div', '', 'space-head');
+    head.append(node('strong', row.name || row.node_id), node('span', row.kind === 'managed' ? '空间' : '机器', 'chip'));
+    if (c.payer === 'space') head.append(node('span', '当前付费来源', 'chip ok'));
+    card.append(head);
+    card.append(node('div', row.node_id, 'hint mono'));
+    if (c.balance === null || c.balance === undefined) {
+      card.append(node('p', c.error ? `余额读取失败：${c.error}` : '余额未知', 'hint'));
+    } else {
+      const line = node('div', '', 'space-balance');
+      line.append(node('b', Number(c.balance).toLocaleString()), node('span', ` / ${Number(c.funded ?? 0).toLocaleString()} 已充值`));
+      card.append(line);
+      const pct = c.funded > 0 ? Math.max(0, Math.min(100, (c.balance / c.funded) * 100)) : 0;
+      const meter = node('div', '', 'meter'), fill = document.createElement('i');
+      fill.style.width = pct + '%'; meter.append(fill); card.append(meter);
+      card.append(node('p', `已用 ${Number(c.used ?? 0).toLocaleString()}${c.empty_reason ? ` · ${c.empty_reason === 'space_empty' ? '空间未充值' : c.empty_reason}` : ''}`, 'hint'));
+    }
+    const canSwitch = c.balance !== null && c.balance !== undefined && c.payer !== 'space';
+    if (canSwitch) {
+      const btn = node('button', '用这个空间的额度', 'secondary');
+      btn.type = 'button';
+      btn.addEventListener('click', guarded(async () => {
+        const scope2 = { ...selected };
+        if (!c.space_funded) { notice(`${row.name} 余额为 0，切换后不会有可用额度。`, true); }
+        btn.disabled = true;
+        try {
+          const r = await api('space-pool', scoped({ node: row.node_id, mode: 'space', confirm: true }, scope2), scope2.target);
+          if (!sameAccount(scope2)) return;
+          const after = r.credit;
+          notice(`${row.name} 已设为付费来源${after && after.balance != null ? `，余额 ${Number(after.balance).toLocaleString()}` : ''}。后续请求会从这个空间扣费。`,
+            !after || !after.space_funded);
+          spacesCache.at = 0; await spaceCard(true);
+        } catch (err) { notice(`切换失败：${err.message}`, true); }
+        finally { btn.disabled = false; }
+      }));
+      card.append(btn);
+    } else if (c.payer === 'space') {
+      card.append(node('p', '当前由这个空间付费', 'hint ok-text'));
+    }
+    return card;
+  }));
+}
 async function overview() {
   const read = beginRead('overview');
   const memberRead = beginRead('membership', read.scope);
@@ -671,6 +739,8 @@ async function overview() {
     box.append(reset); $('quota').append(box);
   }
   });
+
+  spaceCard().catch(() => {});
 
   const c = runtime.counters || {};
   renderChanged('traffic', [identity(read.scope), c], () => {
@@ -1400,6 +1470,7 @@ $('refresh-membership').addEventListener('click', guarded(async () => {
   const data = await api('membership/refresh', scoped({}, read.scope), read.scope.target);
   if (read.valid()) { renderMembership(data); notice('会员状态已查询'); }
 }));
+if ($('refresh-spaces')) $('refresh-spaces').addEventListener('click', guarded(async () => { spacesCache.at = 0; await spaceCard(true); notice('空间额度已刷新。'); }));
 if ($('check-reauth')) $('check-reauth').addEventListener('click', guarded(async () => {
   const state = await reauthState();
   if (state) notice(state.needs_reauth ? '该账号需要重新登录。' : '登录状态正常。', state.needs_reauth);
@@ -1432,10 +1503,6 @@ if ($('reauth-form')) $('reauth-form').addEventListener('submit', guarded(async 
   }
   if ($('reauth-code')) $('reauth-code').value = '';
   await finishReauth(r);
-}));
-if ($('check-reauth')) $('check-reauth').addEventListener('click', guarded(async () => {
-  const state = await reauthState();
-  if (state) notice(state.needs_reauth ? '该账号需要重新登录。' : '登录状态正常。', state.needs_reauth);
 }));
 if ($('reauth-start')) $('reauth-start').addEventListener('click', guarded(startReauth));
 if ($('reauth-status')) $('reauth-status').addEventListener('click', guarded(queryReauth));

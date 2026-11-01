@@ -770,6 +770,146 @@ textarea[aria-invalid="true"] {
   margin: var(--space-3) 0 0;
 }
 
+/* Space credit: one row per Mirasim node (space or machine). A funded space is the
+   only row that can pay for inference, so it gets the accent border. */
+.space-list {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+}
+
+.space-row {
+  border: var(--border-w) solid var(--line);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.space-row[data-funded="yes"] {
+  border-color: var(--ok);
+}
+
+.space-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.space-head strong {
+  font-size: var(--fs-body);
+  font-weight: var(--fw-bold);
+  overflow-wrap: anywhere;
+}
+
+.space-balance {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.space-balance b {
+  font-size: calc(var(--fs-display) * 0.82);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.4px;
+}
+
+.space-balance span {
+  color: var(--muted);
+  font-size: var(--fs-label);
+}
+
+.space-row .mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.space-row button {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+}
+
+.ok-text {
+  color: var(--ok);
+}
+
+
+/* Space credit: one row per Mirasim node (space or machine). A funded space is the
+   only row that can pay for inference, so it gets the accent border. */
+.space-list {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+}
+
+.space-row {
+  border: var(--border-w) solid var(--line);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.space-row[data-funded="yes"] {
+  border-color: var(--ok);
+}
+
+.space-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.space-head strong {
+  font-size: var(--fs-body);
+  font-weight: var(--fw-bold);
+  overflow-wrap: anywhere;
+}
+
+.space-balance {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.space-balance b {
+  font-size: calc(var(--fs-display) * 0.82);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.4px;
+}
+
+.space-balance span {
+  color: var(--muted);
+  font-size: var(--fs-label);
+}
+
+.space-row .mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.space-row button {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+}
+
+.ok-text {
+  color: var(--ok);
+}
+
+
 .meter {
   height: var(--space-2);
   border-radius: var(--space-2);
