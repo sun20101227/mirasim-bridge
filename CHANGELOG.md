@@ -10,7 +10,8 @@
 - 模型名不做本地映射：客户端发 `claude-opus-5-5`，空间自己规范化成 `claude-opus-5-5[1m]`；响应的 `model` 用服务端回帧值。
 - 并发必须自限（`queued` 字段实测不可靠）；`sessionKey` 不可复用（`patch` 帧按会话广播、不带 clientRef，复用会混流）。计费落账有 15–60 秒延迟且可能分批，桥接器只报原始快照。
 - 实测不可用的路径已记入文档：`credit/keys` → `403 trial_space`（体验空间不能建密钥）、`/v2/gateway/model/v1/messages` → `401 turn capability missing`、`turn-capability` → `401 machine-auth: key`（需云实例私钥）、`spaceCreditOnly` 被拒、`gatewayModelRoster` 会断连。
-- 验证：**292 项 Node 回归**（新增 `tests/space-backend.test.js`：假 WS 帧序列、断线、超时、catalog 无 reqId 回显、JWT 到期重签、422 透传、SSE 事件序、`toUsage` 口径）。真实端到端：`POST /v1/messages` → `claude-opus-5-5[1m]` → `BRIDGE_OK`，空间 `used` 上涨。
+- **真实端到端已验收**（2026-11-01，space-316be）：`GET /v1/models` 200/15 个模型；`GET /v1/limits` 200（personal + space `bal=1057 payer=space`）；`POST /v1/messages/count_tokens` 200/19003（本地估算，不烧额度）；`POST /v1/messages` 流式与非线性均 200，文本 `E2E_LIVE_OK` / `NONSTREAM_OK`，`model` 为服务端回的 `claude-opus-5-5[1m]`；SSE 事件序完整，首事件 2175ms。同轮空间账本 `balance 1057→1047`、`used 193→203`，`payer` 保持 `space`。
+- 验证：**315 项 Node 回归**（新增 `tests/space-backend.test.js` 39 项：假 WS 帧序列、断线、超时、catalog 无 reqId 回显、JWT 到期重签、422 透传、SSE 事件序、流式开流时机、合并字节等价、`toUsage` 口径、用量落账）。
 
 ## 未发布 — 2026-11-01（wire format 对齐验证）
 - 把官方桌面客户端的签名内核（`cc_sign` / `cc_seal` / `cc_canonical` 的 wasm）原样存入 `lib/vendor/cc.wasm`，新增 `tests/official-wire-format.test.js` 用它做标准答案：canonical 字符串、加密信封、Ed25519 签名三项**逐字节比对通过**，信封内外 header 划分与官方 `RSi`/`Brc` 规则一致。
