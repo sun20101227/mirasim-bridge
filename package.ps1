@@ -36,7 +36,7 @@ $sourceFiles = @(
     'tests/request-body.test.js', 'UPGRADE-0.8.10.md', 'UPGRADE-0.9.0.md',
     'lib/roster.js', 'lib/space-credit.js', 'tests/space-credit.test.js', 'SPACE-CREDIT.md', 'WIRE-FORMAT.md', 'tests/latest-mirasim.test.js', 'tests/quota-roster.test.js',
     'tests/design-tokens.test.js', 'tests/a11y-static.test.js', 'tests/reauth.test.js', 'tests/mirasim-adapters.test.js',
-    'tests/local-only.test.js', 'tests/official-wire-format.test.js', 'tests/helpers/official-core.js', 'lib/vendor/cc.wasm', 'LOCAL-ONLY.md', 'tests/no-duplicate-definitions.test.js',
+    'tests/local-only.test.js', 'SPACE-BACKEND.md', 'tests/space-backend.test.js', 'lib/space-messages.js', 'lib/space-gateway.js', 'tests/official-wire-format.test.js', 'tests/helpers/official-core.js', 'lib/vendor/cc.wasm', 'LOCAL-ONLY.md', 'tests/no-duplicate-definitions.test.js',
     'tests/docker-context.test.js',
     'tests/docker-context.test.js'
 )
@@ -53,10 +53,12 @@ function Write-Bundle([string]$Name, [bool]$Private) {
     foreach ($relative in $sourceFiles) {
         $full = Join-Path $root $relative
         if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Missing project file: $relative" }
-        if ([System.IO.Path]::GetExtension($relative) -eq '.png') {
+        # Binary assets go in byte for byte. `.wasm` is the crypto core vendored from
+        # the desktop client — decoding it as UTF-8 corrupts it exactly like a PNG.
+        if (@('.png', '.wasm') -contains [System.IO.Path]::GetExtension($relative)) {
             $entries[$relative] = [System.IO.File]::ReadAllBytes($full)
         } else {
-            # Normalize text only: decoding a PNG as UTF-8 corrupts the logo.
+            # Normalize text only: decoding a PNG or wasm as UTF-8 corrupts it.
             $text = [System.IO.File]::ReadAllText($full).Replace("`r`n", "`n").TrimStart([char]0xfeff)
             $entries[$relative] = $utf8.GetBytes($text)
         }

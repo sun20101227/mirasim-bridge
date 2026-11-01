@@ -1,6 +1,10 @@
 # mirasim-bridge
 
-把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.4**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+把 Mirasim 的 **Claude、GPT、DeepSeek、Kimi、Gemini、Grok** 模型桥接到固定 HTTP 端口，通过标准上游账号接入原版 sub2api。当前版本 **0.9.5**，支持网页管理、网络升级接口、**多个 Mira 账号托管在同一个 bridge**（sub2api 按密钥区分）、额度备注同步、独立容器和 systemd，不需要更换 sub2api 或占用现有插件能力。
+
+**0.9.5**：新增 `backend: "space"`——把 `/v1/messages` 变成**云空间里的 agent 回合**，费用从空间额度扣。通道是 WebSocket（`/v2/gateway/session` → `wss://…/v2/gateway/ws` → `prompt` 帧），不是 HTTP 路由。语义差别如实暴露：tools 被丢弃、不返回 tool_use、每次约 19–20k tokens 的 agent 基线。流式打开在 `streaming` 阶段而非首个 token，带 15s 心跳与 50ms 合并；客户端断开时向空间发 `stop`。见 [空间后端](SPACE-BACKEND.md)。
+
+**0.9.5**：新增 `backend: "space"`——把 `/v1/messages` 变成**云空间里的 agent 回合**，费用从空间额度扣。通道是 WebSocket（`/v2/gateway/session` → `wss://…/v2/gateway/ws` → `prompt` 帧），不是 HTTP 路由。语义差别如实暴露：tools 被丢弃、不返回 tool_use、每次约 19–20k tokens 的 agent 基线。流式打开在 `streaming` 阶段而非首个 token，带 15s 心跳与 50ms 合并；客户端断开时向空间发 `stop`。见 [空间后端](SPACE-BACKEND.md)。
 
 **0.9.4**：空间额度可在网页端选择——「运行概览」新增空间额度卡片，列出每个空间/机器的余额与当前付费来源，一键把有余额的空间设为付费来源。`/v2` 请求改为只发 access token，与官方客户端的调用方式一致。见 [空间额度说明](SPACE-CREDIT.md)。
 

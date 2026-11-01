@@ -12,6 +12,8 @@
 - 新增 `space.max_concurrency`（默认 1，范围 1–16）：space 回合**在协议层无法取消**，被放弃的请求仍会跑完并扣额度，所以用拒绝任务来兜底。`effectiveConcurrency()` 取它与 `forward.max_concurrency` 的较小值；relay 后端不受影响。
 - 并发必须自限（`queued` 字段实测不可靠）；`sessionKey` 不可复用（`patch` 帧按会话广播、不带 clientRef，复用会混流）。计费落账有 15–60 秒延迟且可能分批，桥接器只报原始快照。
 - 实测不可用的路径已记入文档：`credit/keys` → `403 trial_space`（体验空间不能建密钥）、`/v2/gateway/model/v1/messages` → `401 turn capability missing`、`turn-capability` → `401 machine-auth: key`（需云实例私钥）、`spaceCreditOnly` 被拒、`gatewayModelRoster` 会断连。
+- **客户端断开时向空间发 `stop`**：`stop` 帧带 `taskId` 能真正中断生成，但 host 之后不发终态帧（回合悬挂）。所以 abort 路径先发 stop 拿它的副作用（停止生成、少扣 token），再本地立即 settled，不等永远不来的 ack。为此新增记录 `accepted` 帧里的 `taskId`——不带它 stop 会打中该会话上正在跑的任何任务，这是协议文档警告的竞态。新增回归 1 项。
+- **客户端断开时向空间发 `stop`**：`stop` 帧带 `taskId` 能真正中断生成，但 host 之后不发终态帧（回合悬挂）。所以 abort 路径先发 stop 拿它的副作用（停止生成、少扣 token），再本地立即 settled，不等永远不来的 ack。为此新增记录 `accepted` 帧里的 `taskId`——不带它 stop 会打中该会话上正在跑的任何任务，这是协议文档警告的竞态。新增回归 1 项。
 - **真实端到端已验收**（2026-11-01，space-316be）：`GET /v1/models` 200/15 个模型；`GET /v1/limits` 200（personal + space `bal=1057 payer=space`）；`POST /v1/messages/count_tokens` 200/19003（本地估算，不烧额度）；`POST /v1/messages` 流式与非线性均 200，文本 `E2E_LIVE_OK` / `NONSTREAM_OK`，`model` 为服务端回的 `claude-opus-5-5[1m]`；SSE 事件序完整，首事件 2175ms。同轮空间账本 `balance 1057→1047`、`used 193→203`，`payer` 保持 `space`。
 - 验证：**315 项 Node 回归**（新增 `tests/space-backend.test.js` 39 项：假 WS 帧序列、断线、超时、catalog 无 reqId 回显、JWT 到期重签、422 透传、SSE 事件序、流式开流时机、合并字节等价、`toUsage` 口径、用量落账）。
 

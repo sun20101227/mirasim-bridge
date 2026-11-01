@@ -25,7 +25,11 @@ def verify(archive):
             if hashlib.sha256(data).hexdigest() != digest:
                 raise ValueError('Hash mismatch: ' + relative)
             original = (root / relative).read_bytes()
-            expected = original if relative.endswith('.png') else original.decode('utf-8-sig').replace('\r\n', '\n').encode('utf-8')
+            # Binary assets are compared byte for byte; text is normalised the same way
+            # package.ps1 writes it (BOM stripped, CRLF folded). `.wasm` joins `.png`
+            # here: the crypto core vendored from the desktop client is not text.
+            binary = relative.endswith('.png') or relative.endswith('.wasm')
+            expected = original if binary else original.decode('utf-8-sig').replace('\r\n', '\n').encode('utf-8')
             if data != expected:
                 raise ValueError('Source bytes differ: ' + relative)
             listed.add(name)
