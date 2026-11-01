@@ -17,9 +17,10 @@ lib/**
 !lib/panel.js
 !lib/roster.js
 !lib/space-credit.js
+!lib/space-gateway.js
+!lib/space-messages.js
 !lib/vendor/
 !lib/vendor/**
-!lib/space-credit.js
 !scripts/
 scripts/**
 !scripts/deployment.js

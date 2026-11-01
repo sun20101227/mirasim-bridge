@@ -1,5 +1,17 @@
 # 变更记录
 
+## 0.9.5 — 2026-11-01（空间后端：用空间额度跑 Claude）
+
+- **新增 `backend: "space"`**：把 Anthropic `/v1/messages` 翻译成**云空间里的一次 agent 回合**，费用从空间额度扣。这是继 `session`、`relay` 之后的第三个后端，配置见 `space: { node_id, gateway_url, workdir, turn_timeout_ms }`。详见 [空间后端](SPACE-BACKEND.md)。
+- **通道不是 HTTP**：`POST /v2/gateway/session` 换短期 JWT → 连 `wss://relay.mirasim.ai/v2/gateway/ws` → 首帧 `gatewayAuth` → 发 `prompt` 帧 → 收 `appendText` / `phase:done`。实测一次 `claude-opus-5-5` 回合后空间 `used` 上涨、个人 `/v1/limits` 同分钟一个数没动；单次扣费**不可精确预测**（5 个 haiku 回合最终只落 8 点，分两批、间隔 45 秒）。
+- **语义差别如实暴露，不假装等价**：这是 agent 回合，调用方的 `tools` / `tool_choice` 被丢弃、永不返回 `tool_use`、`stop_reason` 恒为 `end_turn`；每次请求开新 `sessionKey` 并把历史拍平成 prompt，因此**每次约 19–20k tokens 的 agent 基线**计入 input。被丢弃的字段写进响应头 `X-Mirasim-Dropped`，不静默消失。靠 `tool_use` 驱动的客户端走此后端会退化。
+- 接口：`POST /v1/messages`（支持流式）、`POST /v1/messages/count_tokens`（**本地估算**，不真发回合）、`GET /v1/models`（网关 catalog）、`GET /v1/limits`（`{personal, space}` 双段，失败给 null 不编造）。其余路径 400。
+- 错误映射：空间回 422（模型不支持）→ **400**，不伪装成上游故障，避免 sub2api 把账号判成不健康。`error` 帧与 `session.patch.set.error` 两条路径统一走 `spaceError()` 提取状态码。
+- 模型名不做本地映射：客户端发 `claude-opus-5-5`，空间自己规范化成 `claude-opus-5-5[1m]`；响应的 `model` 用服务端回帧值。
+- 并发必须自限（`queued` 字段实测不可靠）；`sessionKey` 不可复用（`patch` 帧按会话广播、不带 clientRef，复用会混流）。计费落账有 15–60 秒延迟且可能分批，桥接器只报原始快照。
+- 实测不可用的路径已记入文档：`credit/keys` → `403 trial_space`（体验空间不能建密钥）、`/v2/gateway/model/v1/messages` → `401 turn capability missing`、`turn-capability` → `401 machine-auth: key`（需云实例私钥）、`spaceCreditOnly` 被拒、`gatewayModelRoster` 会断连。
+- 验证：**292 项 Node 回归**（新增 `tests/space-backend.test.js`：假 WS 帧序列、断线、超时、catalog 无 reqId 回显、JWT 到期重签、422 透传、SSE 事件序、`toUsage` 口径）。真实端到端：`POST /v1/messages` → `claude-opus-5-5[1m]` → `BRIDGE_OK`，空间 `used` 上涨。
+
 ## 未发布 — 2026-11-01（wire format 对齐验证）
 - 把官方桌面客户端的签名内核（`cc_sign` / `cc_seal` / `cc_canonical` 的 wasm）原样存入 `lib/vendor/cc.wasm`，新增 `tests/official-wire-format.test.js` 用它做标准答案：canonical 字符串、加密信封、Ed25519 签名三项**逐字节比对通过**，信封内外 header 划分与官方 `RSi`/`Brc` 规则一致。
 - 新增 [WIRE-FORMAT.md](WIRE-FORMAT.md) 记录比对了什么、怎么复现，以及仍未解决的部分：relay 对推理请求仍返回 `401 device_signature (missing_headers)`。已排除 deviceId、credential 来源、5 个客户端版本、call id 位置、meta 补全、改用官方 wasm 签名/封印、以及桌面端实时凭证等因素。

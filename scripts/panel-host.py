@@ -19,9 +19,9 @@ SECURITY_HEADERS = {'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-
                     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'"}
 OPERATIONS = {'status', 'summary', 'models', 'model', 'models/family', 'settings', 'test', 'profiles', 'groups', 'login/start', 'login/complete', 'login/status', 'login/cancel',
               'accounts', 'account/host', 'account/unhost', 'account/pause', 'account/resume', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'window-keeper', 'window-keeper/check', 'codex', 'logs', 'usage', 'usage/pricing', 'account/import',
-              'reauth', 'space-credit', 'space-pool'}
+              'reauth', 'space-credit', 'space-pool', 'space-backend'}
 READ_OPERATIONS = {'status', 'summary', 'models', 'profiles', 'groups', 'accounts', 'logs', 'login/status', 'account/access', 'account/check', 'account/check/status', 'membership/refresh', 'usage',
-                   'reauth', 'space-credit'}
+                   'reauth', 'space-credit', 'space-backend'}
 
 # The host handler runs on a ThreadingHTTPServer: guard the shared cache.
 _asset_cache = {}

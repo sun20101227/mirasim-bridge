@@ -27,6 +27,8 @@ const { summarizeLimits, quotaNote, mergeQuotaNote } = require('./lib/quota');
 const { summarizeMembership } = require('./lib/membership');
 const { summarizeRoster, rosterIds, modelInfo } = require('./lib/roster');
 const { summarizeCredit, summarizeNodes, isNodeId } = require('./lib/space-credit');
+const { SpaceGateway } = require('./lib/space-gateway');
+const spaceMessages = require('./lib/space-messages');
 const windowKeeper = require('./lib/window-keeper');
 const { pipeEvents, endWithStreamError, TerminalEvents } = require('./lib/sse');
 const { UsageObservation, storeFor: usageStoreFor } = require('./lib/usage');
@@ -87,6 +89,13 @@ const DEFAULT_CONFIG = {
   // 本来就是「一台机器、一个设备、一个账号、一次只跑一个请求」，而不是多人共用的池。
   // 全部是本地行为开关：它只减少并发、后台轮询和空闲期的合成请求，不改签名、不改设备
   // 标识、不改请求节奏伪装成官方客户端——那些属于绕过访问控制，这个项目不做。
+  // backend: "space" —— /v1/messages 转成云空间里的 agent 回合，费用从空间额度扣。
+  space: {
+    node_id: '',
+    gateway_url: 'wss://relay.mirasim.ai/v2/gateway/ws',
+    workdir: '/data/ws',
+    turn_timeout_ms: 600000,
+  },
   local_only: {
     enabled: false,
     // 强制单并发：同一时刻只允许一个推理请求在途。真正的瓶颈是上游眼里「同时有几个
@@ -261,6 +270,14 @@ function loadConfig(args) {
   return cfg;
 }
 
+function validateSpaceConfig(sp) {
+  if (!isPlainObject(sp)) throw new Error('space 必须是对象');
+  if (typeof sp.node_id !== 'string' || (sp.node_id && !isNodeId(sp.node_id))) throw new Error('space.node_id 必须是合法的空间节点 ID（space-…）');
+  if (typeof sp.gateway_url !== 'string' || !/^wss?:\/\//.test(sp.gateway_url)) throw new Error('space.gateway_url 必须是 ws(s):// 地址');
+  if (typeof sp.workdir !== 'string' || !sp.workdir) throw new Error('space.workdir 不能为空');
+  if (!Number.isInteger(sp.turn_timeout_ms) || sp.turn_timeout_ms < 1000) throw new Error('space.turn_timeout_ms 必须是至少 1000 的整数');
+}
+
 function validateLocalOnly(lo) {
   if (!isPlainObject(lo)) throw new Error('local_only 必须是对象');
   for (const key of ['enabled', 'single_concurrency', 'idle_probe']) {
@@ -272,7 +289,7 @@ function validateLocalOnly(lo) {
 }
 
 function validateConfig(cfg) {
-  if (!['session', 'relay'].includes(cfg.backend)) throw new Error('backend 必须是 session 或 relay');
+  if (!['session', 'relay', 'space'].includes(cfg.backend)) throw new Error('backend 必须是 session、relay 或 space');
   for (const key of Object.keys(DEFAULT_CONFIG)) {
     if (isPlainObject(DEFAULT_CONFIG[key]) && !isPlainObject(cfg[key])) throw new Error(`配置 ${key} 必须是对象`);
   }
@@ -334,6 +351,8 @@ function validateConfig(cfg) {
   if (!['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(cfg.constraints.adaptive_default_effort)) throw new Error('adaptive_default_effort 必须为空/low/medium/high/xhigh/max/ultra');
   if (typeof cfg.quota.enabled !== 'boolean' || typeof cfg.quota.sync_notes !== 'boolean' || !Number.isInteger(cfg.quota.interval_sec) || cfg.quota.interval_sec < 60) throw new Error('quota 需要布尔开关和至少 60 秒的同步间隔');
   if (typeof cfg.membership.enabled !== 'boolean' || !Number.isInteger(cfg.membership.interval_sec) || cfg.membership.interval_sec < 60) throw new Error('membership 需要布尔开关和至少 60 秒的查询间隔');
+  validateSpaceConfig(cfg.space);
+  if (cfg.backend === 'space' && !cfg.space.node_id) throw new Error('backend=space 需要配置 space.node_id');
   validateLocalOnly(cfg.local_only);
   windowKeeper.validateConfig(cfg.window_keeper);
   if (cfg.window_keeper.enabled && (cfg.backend !== 'relay' || !cfg.quota.enabled || !cfg.membership.enabled)) throw new Error('自动窗口需要 relay 后端及额度、会员查询');
@@ -384,6 +403,35 @@ function relaySettingPath(cfg) {
   return file ? path.resolve(path.dirname(cfg._config_path || path.join(__dirname, 'config.json')), file)
     : path.join(os.homedir(), '.mirasim', 'setting.json');
 }
+/** relay 和 space 都走 Mirasim 自己的 API（额度、会员、roster、space-credit）。 */
+const usesRelayApi = (cfg) => cfg.backend === 'relay' || cfg.backend === 'space';
+
+const spaceGateways = new WeakMap();
+function getSpaceGateway(cfg) {
+  // Test seam: a config may carry a ready gateway. Production never sets it.
+  if (cfg._spaceGateway) return cfg._spaceGateway;
+  if (!spaceGateways.has(cfg)) {
+    spaceGateways.set(cfg, new SpaceGateway({
+      nodeId: cfg.space.node_id,
+      gatewayUrl: cfg.space.gateway_url,
+      workdir: cfg.space.workdir,
+      turnTimeoutMs: cfg.space.turn_timeout_ms,
+      mint: async () => {
+        const response = await getRelay(cfg).request({
+          path: '/v2/gateway/session', method: 'POST',
+          body: Buffer.from(JSON.stringify({ nodeId: cfg.space.node_id, idleSleep: 1 })),
+          signal: AbortSignal.timeout(25000),
+        });
+        const raw = await readStreamText(response);
+        let json = null;
+        try { json = JSON.parse(raw); } catch { /* handled by the caller */ }
+        return { status: response.statusCode, json, raw };
+      },
+    }));
+  }
+  return spaceGateways.get(cfg);
+}
+
 function getRelay(cfg) {
   if (!relayClients.has(cfg)) relayClients.set(cfg, new RelayClient({ ...cfg.relay, setting_json: relaySettingPath(cfg) }));
   return relayClients.get(cfg);
@@ -1356,6 +1404,8 @@ const targetCache = { at: 0, value: null };
 
 function resolveTarget(cfg, { preferPid = null, maxAgeMs = 2000, strict = false } = {}) {
   if (cfg.backend === 'relay') return { relay: getRelay(cfg), kind: 'relay' };
+  if (cfg.backend === 'space') return { space: getSpaceGateway(cfg), kind: 'space' };
+  if (cfg.backend === 'space') return { space: getSpaceGateway(cfg), kind: 'space' };
   if (strict && !preferPid) return null;
   if (targetCache.value && Date.now() - targetCache.at < maxAgeMs) {
     // 缓存命中也要过 strict 闸门：保活会话死了缓存还活着的 2 秒内，不能漏到别人的会话上
@@ -1644,7 +1694,7 @@ const SPACE_CREDIT_TTL_MS = 60 * 1000;
 
 /** Upstream space-credit GET. Returns { status, body } and never throws on a refusal. */
 async function fetchSpaceCredit(cfg, pathname, { timeoutMs = 15000 } = {}) {
-  if (cfg.backend !== 'relay') throw Error('space credit 需要 backend=relay');
+  if (!usesRelayApi(cfg)) throw Error('space credit 需要 backend=relay 或 space');
   const response = await getRelay(cfg).request({ path: pathname, signal: AbortSignal.timeout(timeoutMs) });
   const raw = await readStreamText(response);
   return { status: response.statusCode, body: raw, headers: response.headers };
@@ -1662,7 +1712,7 @@ async function fetchSpaceCredit(cfg, pathname, { timeoutMs = 15000 } = {}) {
  */
 const SPACE_POOLS = new Set(['space', 'personal']);
 async function setSpacePool(cfg, nodeId, { mode, prefer }, { timeoutMs = 15000 } = {}) {
-  if (cfg.backend !== 'relay') throw Error('space credit 需要 backend=relay');
+  if (!usesRelayApi(cfg)) throw Error('space credit 需要 backend=relay 或 space');
   if (!isNodeId(nodeId)) throw Error('节点 ID 无效');
   if (mode !== undefined && !SPACE_POOLS.has(mode)) throw Error('mode 只能是 space 或 personal');
   if (prefer !== undefined && !SPACE_POOLS.has(prefer)) throw Error('prefer 只能是 space 或 personal');
@@ -1690,7 +1740,7 @@ async function setSpacePool(cfg, nodeId, { mode, prefer }, { timeoutMs = 15000 }
  * both a fallback model list and proof that reachability is fine.
  */
 async function fetchRoster(cfg, ctx = {}, { force = false, timeoutMs = 15000 } = {}) {
-  if (cfg.backend !== 'relay') return null;
+  if (!usesRelayApi(cfg)) return null;
   const cachedAt = Date.parse(ctx.roster?.fetched_at || '');
   if (!force && ctx.roster && Number.isFinite(cachedAt) && Date.now() - cachedAt < ROSTER_TTL_MS) return ctx.roster;
   try {
@@ -1808,7 +1858,7 @@ async function syncAccountModels(cfg, id, { beforeWrite = async () => {}, accoun
 }
 
 async function refreshQuota(cfg, ctx, { force = false } = {}) {
-  if (cfg.backend !== 'relay' || !cfg.quota.enabled || ctx.shuttingDown) return;
+  if (!usesRelayApi(cfg) || !cfg.quota.enabled || ctx.shuttingDown) return;
   if (!force && Date.now() < (ctx.nextQuotaAt || 0)) return;
   ctx.nextQuotaAt = Date.now() + effectiveInterval(cfg, 'quota') * 1000;
   let snapshot;
@@ -1831,7 +1881,7 @@ async function refreshQuota(cfg, ctx, { force = false } = {}) {
 }
 
 async function refreshMembership(cfg, ctx, { force = false } = {}) {
-  if (cfg.backend !== 'relay' || !cfg.membership.enabled || ctx.shuttingDown) return ctx.membership;
+  if (!usesRelayApi(cfg) || !cfg.membership.enabled || ctx.shuttingDown) return ctx.membership;
   if (ctx.membershipFlight) return ctx.membershipFlight;
   if (!force && Date.now() < (ctx.nextMembershipAt || 0)) return ctx.membership;
   ctx.nextMembershipAt = Date.now() + effectiveInterval(cfg, 'membership') * 1000;
@@ -1871,7 +1921,7 @@ async function runWindowKeeper(cfg, ctx) {
 function managedAccounts(cfg) {
   const list = [{ key: 'main', name: cfg.sub2api.account_name, groupIds: cfg.sub2api.group_ids || [], platform: 'anthropic', family: null, stateKey: null }];
   const o = cfg.sub2api.openai_account || {};
-  if (o.enabled && cfg.backend === 'relay') {
+  if (o.enabled && usesRelayApi(cfg)) {
     list.push({ key: 'codex', name: o.account_name || `${cfg.sub2api.account_name}-codex`, groupIds: o.group_ids || [], platform: 'openai', family: 'gpt-', stateKey: 'codex' });
   }
   return list;
@@ -2496,6 +2546,226 @@ function mergedHeaders(upstreamHeaders, extra = {}) {
 }
 
 /** 约束清洗发现的问题走这里：回一个说人话的 400，而不是那句什么都诊断不了的含混报错 */
+/**
+ * backend: "space" —— 把 Anthropic Messages 翻译成云空间里的一个 agent 回合。
+ *
+ * 语义差别（如实暴露，不假装等价）：
+ *   · agent 回合，不是裸补全：调用方的 tools/tool_choice 被丢弃，永不返回 tool_use
+ *   · stop_reason 恒为 end_turn
+ *   · 每次请求新开 sessionKey，历史拍平成 prompt；每次带 ~19–20k tokens 的 agent 基线
+ *   · 采样参数（temperature/top_p/stop_sequences/thinking/max_tokens）空间不接收
+ * 被丢弃的字段写进响应头 X-Mirasim-Dropped，不静默消失。
+ */
+async function handleSpaceProxy(req, res, cfg, ctx, gateway) {
+  const startedAt = Date.now();
+  const pathname = String(req.url || '').split('?')[0].replace(/\/+$/, '') || '/';
+  const method = req.method;
+
+  if (method === 'GET' && pathname === '/v1/models') {
+    try {
+      const models = await gateway.getCatalog();
+      const data = (models || []).map((m) => {
+        const id = typeof m === 'string' ? m : m?.id;
+        return { id, object: 'model', created: 0, owned_by: 'mirasim-space' };
+      }).filter((m) => m.id && isModelAllowed(m.id, cfg));
+      ctx.counters.models_filtered += Math.max(0, (models || []).length - data.length);
+      const body = JSON.stringify({ object: 'list', data });
+      ctx.counters.ok++;
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      return res.end(body);
+    } catch (err) {
+      ctx.counters.err++;
+      return fail503(res, `space catalog failed: ${err.message}`);
+    }
+  }
+
+  if (method === 'GET' && pathname === '/v1/limits') {
+    // 两套账本各读各的：personal 走 relay /v1/limits，space 走 /v2/machines/<node>/credit。
+    // 一侧失败只报 null，不编造，也不掩盖另一侧。
+    let personal = null;
+    try {
+      const response = await getRelay(cfg).request({ path: '/v1/limits', signal: AbortSignal.timeout(15000) });
+      if (response.statusCode === 200) personal = summarizeLimits(JSON.parse(await readStreamText(response)));
+    } catch { /* 未配置 relay 凭证时只有 space 一侧 */ }
+    let space = null;
+    try {
+      const response = await getRelay(cfg).request({
+        path: '/v2/machines/' + cfg.space.node_id + '/credit', signal: AbortSignal.timeout(15000),
+      });
+      if (response.statusCode === 200) space = summarizeCredit(JSON.parse(await readStreamText(response)));
+    } catch { /* 读不到就不报数 */ }
+    const payload = JSON.stringify({ source: 'mirasim-space', personal, space }, null, 2) + '\n';
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(payload) });
+    return res.end(payload);
+  }
+
+  if (method === 'POST' && pathname === '/v1/messages/count_tokens') {
+    // 不真发回合：那会白烧约 20k tokens 且扣空间额度。按字符数粗估 + agent 基线。
+    const { body } = await readBody(req, 8 * 1024 * 1024);
+    let parsed = null;
+    try { parsed = JSON.parse(body.toString('utf8')); } catch { /* 按空算 */ }
+    let prompt = '';
+    try { prompt = parsed ? spaceMessages.toPrompt(parsed).prompt : ''; } catch { /* 形状不对也照估 */ }
+    const payload = JSON.stringify({ input_tokens: Math.ceil(prompt.length / 4) + SPACE_AGENT_BASELINE_TOKENS });
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(payload) });
+    return res.end(payload);
+  }
+
+  if (!(method === 'POST' && pathname === '/v1/messages')) {
+    return fail400(res, { message: 'backend=space 仅支持 POST /v1/messages、/v1/messages/count_tokens 与 GET /v1/models、/v1/limits' });
+  }
+
+  const { body, overflow } = await readBody(req, cfg.forward.replay_buffer_mb * 1024 * 1024);
+  if (overflow) return fail400(res, { message: '请求体超过 forward.replay_buffer_mb 限制' });
+
+  let parsed;
+  try { parsed = JSON.parse(body.toString('utf8')); }
+  catch { return fail400(res, { message: '请求体必须是 JSON 对象' }); }
+  if (!isPlainObject(parsed)) return fail400(res, { message: '请求体必须是 JSON 对象' });
+
+  let prompt, notes;
+  try { ({ prompt, notes } = spaceMessages.toPrompt(parsed)); }
+  catch (err) { return failRequest(res, { message: err.message }, err.status || 400); }
+
+  const requested = typeof parsed.model === 'string' ? parsed.model : '';
+  if (!isModelAllowed(requested, cfg)) return fail400(res, { message: '模型 ' + requested + ' 不在本账号允许的范围内' });
+
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  const wantsStream = parsed.stream === true;
+  const dropped = notes.join('; ');
+  const dropHeader = dropped ? { 'x-mirasim-dropped': encodeURIComponent(dropped).slice(0, 900) } : {};
+  let stream = null;
+  let stopHeartbeat = null;
+
+  try {
+    if (wantsStream) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+        ...dropHeader,
+      });
+      let served = requested;
+      stream = new spaceMessages.MessagesStream(() => served, (chunk) => { if (!res.writableEnded) res.write(chunk); });
+      // SSE comment heartbeat: the host can sit silent for tens of seconds while the
+      // agent warms up or thinks, and proxies cut a quiet socket.
+      const heartbeat = setInterval(() => {
+        if (res.writableEnded) return;
+        try { res.write(': keepalive' + String.fromCharCode(10, 10)); } catch { /* gone */ }
+      }, 15000);
+      heartbeat.unref?.();
+      stopHeartbeat = () => clearInterval(heartbeat);
+      res.once('close', stopHeartbeat);
+
+      const turn = await gateway.runTurn({
+        prompt, model: requested, signal: controller.signal,
+        onDelta: (t) => stream.delta(t),
+        onUpdate: (field, value) => {
+          // message_start 用服务端回的模型名；并且一进入 streaming 就开流，
+          // 不等第一个 token —— 否则客户端会在 agent 预热期对着空 socket。
+          if (field === 'model') served = value;
+          if (field === 'phase' && value === 'streaming') stream.open();
+        },
+      });
+      stream.finish(turn);
+      stopHeartbeat();
+      ctx.counters.ok++;
+      ctx.lastUpstreamOkAt = Date.now();
+      recordSpaceTurn(ctx, turn, startedAt);
+      recordSpaceUsage(cfg, ctx, { requested, turn, startedAt, status: 200 });
+      return res.end();
+    }
+
+    const turn = await gateway.runTurn({ prompt, model: requested, signal: controller.signal });
+    ctx.counters.ok++;
+    ctx.lastUpstreamOkAt = Date.now();
+    recordSpaceTurn(ctx, turn, startedAt);
+    recordSpaceUsage(cfg, ctx, { requested, turn, startedAt, status: 200 });
+    const payload = JSON.stringify(spaceMessages.toMessage(turn, requested));
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(payload), ...dropHeader,
+    });
+    return res.end(payload);
+  } catch (err) {
+    ctx.counters.err++;
+    // space 处理器在内部自己 catch，走不到 HTTP 层那个补趋势计数的 catch。
+    bumpHistory(ctx, 'err');
+    if (requested) recordLatency(ctx, requested, { at: Date.now(), ok: false, ttfb: null, total: Date.now() - startedAt });
+    if (err?.aborted || controller.signal.aborted) { if (!res.writableEnded) res.destroy(); return; }
+    if (res.headersSent) {
+      // 已经开流：必须由同一个 stream 对象收尾，否则缓冲里的尾巴会漏在错误之后。
+      try {
+        if (stream && typeof stream.fail === 'function') stream.fail(err.message, err && err.code);
+        else res.write('event: error' + String.fromCharCode(10) + 'data: '
+          + JSON.stringify({ type: 'error', error: { type: 'api_error', message: err.message } })
+          + String.fromCharCode(10, 10));
+        res.end();
+      } catch { /* 已断 */ }
+      if (typeof stopHeartbeat === 'function') stopHeartbeat();
+      return;
+    }
+    // 上游 4xx（模型不支持等）是调用方的问题：原样透出 400，不伪装成上游故障。
+    const upstreamStatus = Number(err?.status) || 0;
+    const clientFault = upstreamStatus >= 400 && upstreamStatus < 500;
+    return failRequest(res, {
+      message: err.message,
+      code: clientFault ? 'space_upstream_rejected' : 'space_turn_failed',
+      ...(clientFault ? { upstream_status: upstreamStatus } : {}),
+    }, clientFault ? 400 : 502);
+  }
+}
+
+/** Agent 自身 system prompt + 工具定义的实测基线（18877–20155），用于 count_tokens 估算。 */
+const SPACE_AGENT_BASELINE_TOKENS = 19000;
+
+function recordSpaceTurn(ctx, turn, startedAt) {
+  bumpHistory(ctx, 'ok');
+  if (ctx.space) {
+    ctx.space.lastTurn = {
+      at: new Date().toISOString(),
+      model: turn?.model || null,
+      effort: turn?.effort || null,
+      session_key: turn?.sessionKey || null,
+      tool_calls: turn?.toolCalls || 0,
+      usage: turn?.usage || null,
+      elapsed_ms: Date.now() - startedAt,
+      text_chars: typeof turn?.text === 'string' ? turn.text.length : 0,
+    };
+  }
+  const model = turn?.model || '';
+  if (model) recordLatency(ctx, model, { at: Date.now(), ok: true, ttfb: null, total: Date.now() - startedAt });
+}
+
+/**
+ * 把一次 space 回合写进用量账本。
+ * relay/session 路径在 handleProxy 末尾记；space 在 handler 内部就返回了，
+ * 所以必须自己记，否则面板显示零消耗而空间额度在真实下降。
+ */
+function recordSpaceUsage(cfg, ctx, { requested, turn, startedAt, status }) {
+  if (!requested) return;
+  try {
+    const u = spaceMessages.toUsage(turn?.usage);
+    const priced = Number.isFinite(u.input_tokens) && Number.isFinite(u.output_tokens);
+    // `_usageStore` is a test seam only; production never sets it.
+    Promise.resolve((cfg._usageStore || usageStoreFor(cfg, ctx)).record({
+      model: requested,
+      served_model: turn?.model || requested,
+      protocol: 'messages',
+      ok: Boolean(turn && turn.phase === 'done'),
+      status,
+      elapsed_ms: Date.now() - startedAt,
+      attempts: 1,
+      input_tokens: Math.max(0, (u.input_tokens || 0) - (u.cache_read_input_tokens || 0) - (u.cache_creation_input_tokens || 0)),
+      output_tokens: u.output_tokens ?? 0,
+      cache_read_tokens: u.cache_read_input_tokens || 0,
+      cache_write_tokens: u.cache_creation_input_tokens || 0,
+      reasoning_tokens: null,
+      usage_state: priced ? 'complete' : 'unknown',
+    })).catch(() => {});
+  } catch { /* 记账失败绝不影响已送达的响应 */ }
+}
+
 function fail400(res, error) {
   return failRequest(res, error, 400);
 }
@@ -2538,6 +2808,13 @@ async function handleProxy(req, res, cfg, ctx, agent, replayLimit) {
   if (!target) {
     countErr();
     return fail503(res, 'no live agent session (keepalive down?)');
+  }
+
+  // --- backend: space —— 走云空间 agent 回合，费用从空间额度扣 ---
+  // 必须在 readBody 之前：handleSpaceProxy 自己按需读 body（GET /v1/models、
+  // /v1/limits 根本没有 body，先读会永远等不到数据）。
+  if (target.space) {
+    return handleSpaceProxy(req, res, cfg, ctx, target.space);
   }
 
   const { body, overflow } = await readBody(req, replayLimit);
@@ -3817,7 +4094,7 @@ async function cmdServe(cfg, args) {
     && !args.flags['no-register'];
   hub.withSub2api = withSub2api;
 
-  if (cfg.backend === 'relay') {
+  if (usesRelayApi(cfg)) {
     getRelay(cfg);
     log('直连 relay 模式：不启动 Mirasim 后端或 Claude 保活会话');
     for (const name of cfg.accounts.hosted) {
@@ -4451,5 +4728,6 @@ module.exports = { recentLogs, latencySummary, bumpHistory, recordLatency, bridg
    modelFamily, isModelAllowed, catalogRows, replaceCatalogRows, summarizeModelResponse, diagnosticTarget, diagnosticRequest,
   getDiagnosticCatalog, checkDiagnosticModel, cmdModels, cmdTest, getRelay, relaySettingPath, probeUpstream, createShutdownHandler, syncAccountModels, refreshQuota, refreshMembership, runWindowKeeper, sanitizeMessagesRequest,
   fetchRoster, classifyUpstreamFailure, summarizeRoster, rosterIds, modelInfo, bareModelId,
+  getSpaceGateway, usesRelayApi, validateSpaceConfig, SPACE_AGENT_BASELINE_TOKENS,
   effectiveConcurrency, effectiveInterval, upstreamConcurrency, validateLocalOnly,
   summarizeCredit, summarizeNodes, isNodeId, fetchSpaceCredit, spaceCreditPath, setSpacePool, SPACE_POOLS };

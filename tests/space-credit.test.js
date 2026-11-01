@@ -202,6 +202,42 @@ test('panel exposes space credit per account', async (t) => {
   await assert.rejects(panel.call('space-credit', { node: '../etc/passwd' }), /节点|无效/);
 });
 
+test('the space-backend panel card reports config and connection state without spending credit', async (t) => {
+  const dir = tmp(t, 'mira-space-backend-'); const { origin, seen } = await creditRelay(t);
+  const cfg = relayCfg(dir, origin);
+  cfg.backend = 'space';
+  cfg.space = { ...cfg.space, node_id: 'space-316be' };
+  const ctx = b.newAccountCtx('main');
+  const panel = createPanel(cfg, ctx); t.after(() => panel.close());
+
+  const before = seen.length;
+  const out = await panel.call('space-backend', {});
+  assert.equal(out.backend, 'space');
+  assert.equal(out.enabled, true);
+  assert.equal(out.node_id, 'space-316be');
+  assert.equal(out.connected, false, 'nothing is connected until the console asks');
+  assert.equal(out.last_turn, null);
+  assert.equal(seen.length, before, 'the default read must not touch the relay at all');
+});
+
+test('the space-backend card is inert on any other backend', async (t) => {
+  const dir = tmp(t, 'mira-space-backend-off-'); const { origin } = await creditRelay(t);
+  const cfg = relayCfg(dir, origin);   // backend: relay
+  const panel = createPanel(cfg, b.newAccountCtx('main')); t.after(() => panel.close());
+  const out = await panel.call('space-backend', {});
+  assert.equal(out.enabled, false);
+  assert.equal(out.backend, 'relay');
+});
+
+test('the space-backend card is inert on any other backend', async (t) => {
+  const dir = tmp(t, 'mira-space-backend-off-'); const { origin } = await creditRelay(t);
+  const cfg = relayCfg(dir, origin);   // backend: relay
+  const panel = createPanel(cfg, b.newAccountCtx('main')); t.after(() => panel.close());
+  const out = await panel.call('space-backend', {});
+  assert.equal(out.enabled, false);
+  assert.equal(out.backend, 'relay');
+});
+
 test('/v2 requests carry only the access token, like the official client', async (t) => {
   // server-main.cjs ugn(): authorization + content-type, nothing else. An extra
   // x-mirasim-* header is data the official client never sends.
