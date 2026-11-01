@@ -1,11 +1,7 @@
 # 变更记录
 
 ## 0.9.6 — 2026-11-01（空间会话复用）
-- **新增 `space.session_reuse`（默认 false）**：开启后复用上一个回合的 `sessionKey`，只付一次约 19k tokens 的 agent 基线。代价是上下文跨请求累积，只在「每个请求都是同一个人」的单用户部署里开启。
-- 安全阀：`effectiveConcurrency(cfg) > 1` 时自动退回 `sessionKey: null`。host 按 sessionKey 广播 patch 帧且不带 clientRef，两个并发回合共用一个会话会互相收到对方文本（实测出现过 `"AB"+"CD"` 混流），所以复用与并发互斥。
-- 新增回归 2 项：开关语义、并发时自动退回、非法值校验、记忆只在开启时生效。
-
-## 0.9.6 — 2026-11-01（空间会话复用）
+- 修正文档中「tools 完全不可用」的说法：`prompt` 帧确实没有 `tools` 字段，但网关有独立的 MCP 通道——`saveMcp` 可给空间注册 MCP server（实测注册 `filesystem` 后 `servers` 立即出现、`removeMcp` 后回到空），工具能力由此获得。桥接器不自动注册：那会改动空间持久状态，多调用方场景也无法决定装什么。见 [空间后端](SPACE-BACKEND.md)。
 - **新增 `space.session_reuse`（默认 false）**：开启后复用上一个回合的 `sessionKey`，只付一次约 19k tokens 的 agent 基线。代价是上下文跨请求累积，只在「每个请求都是同一个人」的单用户部署里开启。
 - 安全阀：`effectiveConcurrency(cfg) > 1` 时自动退回 `sessionKey: null`。host 按 sessionKey 广播 patch 帧且不带 clientRef，两个并发回合共用一个会话会互相收到对方文本（实测出现过 `"AB"+"CD"` 混流），所以复用与并发互斥。
 - 新增回归 2 项：开关语义、并发时自动退回、非法值校验、记忆只在开启时生效。
