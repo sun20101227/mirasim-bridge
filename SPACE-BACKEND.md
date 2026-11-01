@@ -9,7 +9,7 @@
 | | `relay` | `space` |
 |---|---|---|
 | 上游 | relay 的模型路由 | 云空间里的 Claude Code agent |
-| 调用方 `tools` | 原样透传，会返回 `tool_use` | **被丢弃**，永不返回 `tool_use` |
+| 调用方 `tools` | 原样透传，会返回 `tool_use` | **被丢弃**，永不返回 `tool_use`。工具能力改由 **MCP** 提供（见下） |
 | `stop_reason` | 上游真实值 | 恒为 `end_turn` |
 | 采样参数 | 部分接受 | `temperature` / `top_p` / `stop_sequences` / `thinking` / `max_tokens` **全部忽略** |
 | 输入 token 基线 | 无 | **每次约 19–20k**（agent 自身 system prompt + 工具定义） |
@@ -279,6 +279,29 @@ host 端也确实有处理分支 `case "stop": this["io"]["stop"](sessionKey)`�
 space 回合计入 `inflight`，drain 最长等 `space.turn_timeout_ms`（默认 600s），
 但 `shutdown.total_timeout_sec` 默认只有 150s，因此**超时会强制退出**。
 这是有意的：宁可中断等待，也不让进程无限挂着。
+
+## 工具（MCP）
+
+`prompt` 帧没有 `tools` 字段，所以调用方的工具定义无处安放。但网关有独立的 MCP 通道：
+
+```
+{"type":"saveMcp","server":{name,type:"stdio",command,args},"scope":"workspace"}
+→ {"type":"mcp","servers":[{id:"workspace:<name>",enabled:true,...}],"catalog":[...]}
+{"type":"removeMcp","name":...,"scope":"workspace"}
+```
+
+实测：给 space-316be 注册 `filesystem` MCP server 后，`servers` 立刻出现该条目
+（`managed:true, origin:"mirasim"`），删除后回到 `[]`。空间自带一份 catalog
+（filesystem / github / …），`getConfig` 也能读到。
+
+含义：
+
+- 工具**不是**完全不可用，但只能通过「给空间装 MCP server」的方式获得，
+  不能把调用方每次请求里的 `tools` 映射过去。
+- MCP server 由**空间实例自己**启动，因此它访问的是容器内的路径
+  （`/data/ws`），不是调用方的文件系统。
+- 桥接器**不自动注册 MCP**：那会改动空间的持久状态，且对多调用方场景无法
+  决定装什么。需要时由运维在空间里手动配置。
 
 ## 已知不可用
 
