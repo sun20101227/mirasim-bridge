@@ -842,3 +842,27 @@ test('the space backend caps in-flight turns below the generic concurrency setti
   bridge.validateConfig(cfg);
   assert.equal(bridge.effectiveConcurrency(cfg), 8);
 });
+
+test('aborting a turn sends stop for that task before giving up locally', async () => {
+  // Measured 2026-11-01: `stop` with a taskId does halt generation in the space, but
+  // the host then never sends a terminal phase - the turn hangs. So the gateway fires
+  // the frame for its side effect and settles locally without waiting for an ack.
+  await withFakeSocket(async () => {
+    const { gw } = makeGateway();
+    const { socket } = await connectFake(gw);
+    const controller = new AbortController();
+    const running = gw.runTurn({ prompt: 'long job', model: 'claude-opus-5-5', signal: controller.signal });
+    running.catch(() => {});
+    const prompt = await waitForFrame(socket, 'prompt');
+    socket.push({ type: 'accepted', clientRef: prompt.clientRef, sessionKey: 'claude:abc', taskId: 'task-1' });
+    await new Promise((r) => setTimeout(r, 30));
+
+    controller.abort();
+    await assert.rejects(running, (err) => err.aborted === true);
+    const stop = socket.sent.filter((f) => f.type === 'stop').at(-1);
+    assert.ok(stop, 'a stop frame was sent');
+    assert.equal(stop.taskId, 'task-1', 'the stop names this run, not the session at large');
+    assert.equal(stop.sessionKey, 'claude:abc');
+    gw.close();
+  });
+});
